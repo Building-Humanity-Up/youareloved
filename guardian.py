@@ -31,7 +31,6 @@ import hashlib
 import socket
 import threading
 import urllib.request
-import py_compile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -42,10 +41,6 @@ EARLY_IMAGE_ONLY = "--image-only" in sys.argv[1:]
 # ---------------------------------------------------------------------------
 
 VERSION = "2"
-UPDATE_BOOTSTRAP_URL = "https://gist.githubusercontent.com/danielliangquestions/455ec3994fc980c1ee9b14f4d02afc27/raw/yal_update.json"
-UPDATE_CHECK_HOUR = 3
-UPDATE_INTERVAL_SECONDS = 300
-UPDATE_STATE_FILE = Path("/tmp/yal_last_update_check")
 
 os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "")
 
@@ -277,8 +272,6 @@ last_dialog_time: float = 0.0
 last_lock_time: float = 0.0
 scan_count: int = 0
 in_cooldown: bool = False
-UPDATE_LOCK = threading.Lock()
-UPDATE_IN_PROGRESS: bool = False
 
 # ---------------------------------------------------------------------------
 # Idle Detection
@@ -761,94 +754,6 @@ def _recreate_plist():
         log.info("TAMPER: Plist recreated")
     except Exception as e:
         log.error(f"TAMPER: Plist recreation failed: {e}")
-
-# ---------------------------------------------------------------------------
-# Auto-Update (interval polling, async)
-# ---------------------------------------------------------------------------
-
-def _read_last_update_check_ts() -> int:
-    try:
-        if UPDATE_STATE_FILE.exists():
-            return int(UPDATE_STATE_FILE.read_text().strip() or "0")
-    except Exception as e:
-        log.debug(f"UPDATE: State read failed: {e}")
-    return 0
-
-def _write_last_update_check_ts(ts: int):
-    try:
-        UPDATE_STATE_FILE.write_text(str(int(ts)))
-    except Exception as e:
-        log.error(f"UPDATE: State write failed — {e}")
-
-def maybe_start_update_check_async():
-    global UPDATE_IN_PROGRESS
-    now = int(time.time())
-    with UPDATE_LOCK:
-        if UPDATE_IN_PROGRESS:
-            return
-        last_ts = _read_last_update_check_ts()
-        if last_ts and (now - last_ts) < UPDATE_INTERVAL_SECONDS:
-            return
-        _write_last_update_check_ts(now)
-        UPDATE_IN_PROGRESS = True
-        try:
-            t = threading.Thread(target=check_for_updates, daemon=True)
-            t.start()
-            log.info(f"UPDATE: Scheduled async check (interval={UPDATE_INTERVAL_SECONDS}s)")
-        except Exception as e:
-            UPDATE_IN_PROGRESS = False
-            log.error(f"UPDATE: Failed to start async check — {e}")
-
-def check_for_updates():
-    """Check for updates via bootstrap JSON (async worker, interval-gated by scheduler)."""
-    global UPDATE_IN_PROGRESS
-    try:
-        # Fetch bootstrap
-        with urllib.request.urlopen(UPDATE_BOOTSTRAP_URL, timeout=10) as r:
-            bootstrap = json.loads(r.read())
-
-        remote_version = bootstrap["version"]
-        guardian_url = bootstrap["guardian_url"]
-
-        try:
-            local_version_int = int(VERSION)
-            remote_version_int = int(str(remote_version))
-        except Exception:
-            log.error(f"UPDATE: Malformed remote version '{remote_version}' — skipping")
-            return
-
-        if remote_version_int <= local_version_int:
-            log.info(f"UPDATE: No upgrade needed — local v{VERSION}, remote v{remote_version}")
-            return
-
-        log.info(f"UPDATE: Available v{VERSION} → v{remote_version}")
-
-        # Download, validate, backup, replace, restart
-        new_path = str(GUARDIAN_PATH.parent / "guardian_new.py")
-        with urllib.request.urlopen(guardian_url, timeout=30) as r:
-            new_code = r.read()
-        with open(new_path, "wb") as f:
-            f.write(new_code)
-
-        result = subprocess.run(
-            [sys.executable, "-m", "py_compile", new_path],
-            capture_output=True)
-        if result.returncode != 0:
-            log.error("UPDATE: Validation failed — staying on current")
-            os.unlink(new_path)
-            return
-
-        import shutil
-        shutil.copy2(str(GUARDIAN_PATH), str(GUARDIAN_PATH) + ".backup")
-        shutil.move(new_path, str(GUARDIAN_PATH))
-        log.info(f"UPDATE: Updated to v{remote_version} — restarting")
-        os.execv(sys.executable, [sys.executable] + sys.argv)
-
-    except Exception as e:
-        log.error(f"UPDATE: Check failed — {e} — continuing v{VERSION}")
-    finally:
-        with UPDATE_LOCK:
-            UPDATE_IN_PROGRESS = False
 
 # ---------------------------------------------------------------------------
 # Memory (unified — Claude-confirmed discipline)
@@ -2007,7 +1912,7 @@ def main():
         log.info(f"    {p.get('email', '?')} | TG: {tg or 'not set'}")
     log.info(f"  SendGrid: {'✓' if get_sendgrid_key() else '✗'}")
     log.info(f"  Telegram: {'✓' if get_telegram_token() else '✗'}")
-    log.info(f"  Auto-update poll: every {UPDATE_INTERVAL_SECONDS}s (async)")
+    log.info("  Auto-update: managed by watchdog")
     if IMAGE_ONLY_MODE:
         log.info("  Detection mode: IMAGE_ONLY_MODE (visual only; enforcement unchanged)")
     log.info(f"  Audit: {AUDIT_DIR}")
@@ -2029,7 +1934,6 @@ def main():
 
     while True:
         try:
-            maybe_start_update_check_async()
             next_interval = scan_cycle()
         except KeyboardInterrupt:
             log.info("Stopped.")
