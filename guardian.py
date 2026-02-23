@@ -40,7 +40,7 @@ EARLY_IMAGE_ONLY = "--image-only" in sys.argv[1:]
 # Version & Auto-Update
 # ---------------------------------------------------------------------------
 
-VERSION = "3"
+VERSION = "4"
 
 os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "")
 
@@ -57,7 +57,7 @@ except ImportError:
 
 DIALOG_COOLDOWN = 30
 LOCK_COOLDOWN = 600  # 10 min before next lock
-TRIGGER_THRESHOLD = 0.31
+TRIGGER_THRESHOLD = 0.32
 COARSE_GRID = 5
 FINE_GRID = 3
 DETECTION_ANY = 0.10
