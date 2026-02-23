@@ -41,7 +41,7 @@ EARLY_IMAGE_ONLY = "--image-only" in sys.argv[1:]
 # Version & Auto-Update
 # ---------------------------------------------------------------------------
 
-VERSION = "1"
+VERSION = "2"
 UPDATE_BOOTSTRAP_URL = "https://gist.githubusercontent.com/danielliangquestions/455ec3994fc980c1ee9b14f4d02afc27/raw/yal_update.json"
 UPDATE_CHECK_HOUR = 3
 UPDATE_INTERVAL_SECONDS = 300
