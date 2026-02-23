@@ -16,3 +16,4 @@ install_daemon.sh
 .yal_last_update_check
 yal.sh
 ios/
+*.backup
