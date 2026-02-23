@@ -1702,7 +1702,7 @@ def show_dialog():
         subprocess.Popen(["osascript", "-e",
             'display dialog "You are loved.\n\n'
             'Reach out to your accountability partner." '
-            'buttons {"I need help", "OK"} default button "OK" '
+            'buttons {"I need help 2", "OK"} default button "OK" '
             'with title "You Are Loved" with icon caution'])
         log.info("RESPONSE: Dialog shown")
     except Exception:
