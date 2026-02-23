@@ -21,6 +21,7 @@ Idle-adaptive scanning: 5s / 30s / 10min / pause.
 import os
 import sys
 import time
+import argparse
 import subprocess
 import logging
 import json
@@ -34,14 +35,17 @@ import py_compile
 from datetime import datetime, timedelta
 from pathlib import Path
 
+EARLY_IMAGE_ONLY = "--image-only" in sys.argv[1:]
+
 # ---------------------------------------------------------------------------
 # Version & Auto-Update
 # ---------------------------------------------------------------------------
 
-VERSION = "0.1.0"
+VERSION = "1"
 UPDATE_BOOTSTRAP_URL = "https://gist.githubusercontent.com/danielliangquestions/455ec3994fc980c1ee9b14f4d02afc27/raw/yal_update.json"
 UPDATE_CHECK_HOUR = 3
-UPDATE_STATE_FILE = Path.home() / ".yal_last_update_check"
+UPDATE_INTERVAL_SECONDS = 300
+UPDATE_STATE_FILE = Path("/tmp/yal_last_update_check")
 
 os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "")
 
@@ -70,6 +74,7 @@ SCAN_AWAY_CHECK = 60
 IDLE_THRESHOLD_1 = 60
 IDLE_THRESHOLD_2 = 600
 IDLE_THRESHOLD_3 = 1800
+IMAGE_ONLY_MODE = True
 
 LOG_FILE = Path.home() / "yal_log.txt"
 MEMORY_FILE = Path.home() / ".yal_memory.json"
@@ -236,30 +241,33 @@ log.handlers.clear()
 
 _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 
-_fh = logging.FileHandler("/tmp/yal.log")
-_fh.setLevel(logging.DEBUG)
-_fh.setFormatter(_fmt)
-log.addHandler(_fh)
+if EARLY_IMAGE_ONLY:
+    log.addHandler(logging.NullHandler())
+else:
+    _fh = logging.FileHandler("/tmp/yal.log")
+    _fh.setLevel(logging.DEBUG)
+    _fh.setFormatter(_fmt)
+    log.addHandler(_fh)
 
-try:
-    _fh_desktop = logging.FileHandler(str(TEXT_LOG))
-    _fh_desktop.setLevel(logging.DEBUG)
-    _fh_desktop.setFormatter(_fmt)
-    log.addHandler(_fh_desktop)
-except (PermissionError, OSError):
-    # Daemon runs as root — can't write to ~/Desktop
-    # Fall back to /tmp which is always writable
-    _fh_fallback = logging.FileHandler("/tmp/yal_text.log")
-    _fh_fallback.setLevel(logging.DEBUG)
-    _fh_fallback.setFormatter(_fmt)
-    log.addHandler(_fh_fallback)
+    try:
+        _fh_desktop = logging.FileHandler(str(TEXT_LOG))
+        _fh_desktop.setLevel(logging.DEBUG)
+        _fh_desktop.setFormatter(_fmt)
+        log.addHandler(_fh_desktop)
+    except (PermissionError, OSError):
+        # Daemon runs as root — can't write to ~/Desktop
+        # Fall back to /tmp which is always writable
+        _fh_fallback = logging.FileHandler("/tmp/yal_text.log")
+        _fh_fallback.setLevel(logging.DEBUG)
+        _fh_fallback.setFormatter(_fmt)
+        log.addHandler(_fh_fallback)
 
-# Only add stdout handler when running interactively (not as daemon)
-if sys.stdout.isatty():
-    _sh = logging.StreamHandler(sys.stdout)
-    _sh.setLevel(logging.INFO)
-    _sh.setFormatter(_fmt)
-    log.addHandler(_sh)
+    # Only add stdout handler when running interactively (not as daemon)
+    if sys.stdout.isatty():
+        _sh = logging.StreamHandler(sys.stdout)
+        _sh.setLevel(logging.INFO)
+        _sh.setFormatter(_fmt)
+        log.addHandler(_sh)
 
 # ---------------------------------------------------------------------------
 # State
@@ -269,6 +277,8 @@ last_dialog_time: float = 0.0
 last_lock_time: float = 0.0
 scan_count: int = 0
 in_cooldown: bool = False
+UPDATE_LOCK = threading.Lock()
+UPDATE_IN_PROGRESS: bool = False
 
 # ---------------------------------------------------------------------------
 # Idle Detection
@@ -753,19 +763,46 @@ def _recreate_plist():
         log.error(f"TAMPER: Plist recreation failed: {e}")
 
 # ---------------------------------------------------------------------------
-# Auto-Update (daily, at UPDATE_CHECK_HOUR)
+# Auto-Update (interval polling, async)
 # ---------------------------------------------------------------------------
 
-def check_for_updates():
-    """Check for updates via bootstrap JSON. Once per day, at 3am."""
+def _read_last_update_check_ts() -> int:
     try:
-        today = datetime.now().strftime("%Y-%m-%d")
         if UPDATE_STATE_FILE.exists():
-            if UPDATE_STATE_FILE.read_text().strip() == today:
-                return
-        if datetime.now().hour < UPDATE_CHECK_HOUR:
-            return
+            return int(UPDATE_STATE_FILE.read_text().strip() or "0")
+    except Exception as e:
+        log.debug(f"UPDATE: State read failed: {e}")
+    return 0
 
+def _write_last_update_check_ts(ts: int):
+    try:
+        UPDATE_STATE_FILE.write_text(str(int(ts)))
+    except Exception as e:
+        log.error(f"UPDATE: State write failed — {e}")
+
+def maybe_start_update_check_async():
+    global UPDATE_IN_PROGRESS
+    now = int(time.time())
+    with UPDATE_LOCK:
+        if UPDATE_IN_PROGRESS:
+            return
+        last_ts = _read_last_update_check_ts()
+        if last_ts and (now - last_ts) < UPDATE_INTERVAL_SECONDS:
+            return
+        _write_last_update_check_ts(now)
+        UPDATE_IN_PROGRESS = True
+        try:
+            t = threading.Thread(target=check_for_updates, daemon=True)
+            t.start()
+            log.info(f"UPDATE: Scheduled async check (interval={UPDATE_INTERVAL_SECONDS}s)")
+        except Exception as e:
+            UPDATE_IN_PROGRESS = False
+            log.error(f"UPDATE: Failed to start async check — {e}")
+
+def check_for_updates():
+    """Check for updates via bootstrap JSON (async worker, interval-gated by scheduler)."""
+    global UPDATE_IN_PROGRESS
+    try:
         # Fetch bootstrap
         with urllib.request.urlopen(UPDATE_BOOTSTRAP_URL, timeout=10) as r:
             bootstrap = json.loads(r.read())
@@ -773,10 +810,15 @@ def check_for_updates():
         remote_version = bootstrap["version"]
         guardian_url = bootstrap["guardian_url"]
 
-        UPDATE_STATE_FILE.write_text(today)
+        try:
+            local_version_int = int(VERSION)
+            remote_version_int = int(str(remote_version))
+        except Exception:
+            log.error(f"UPDATE: Malformed remote version '{remote_version}' — skipping")
+            return
 
-        if remote_version == VERSION:
-            log.info(f"UPDATE: Up to date — v{VERSION}")
+        if remote_version_int <= local_version_int:
+            log.info(f"UPDATE: No upgrade needed — local v{VERSION}, remote v{remote_version}")
             return
 
         log.info(f"UPDATE: Available v{VERSION} → v{remote_version}")
@@ -804,6 +846,9 @@ def check_for_updates():
 
     except Exception as e:
         log.error(f"UPDATE: Check failed — {e} — continuing v{VERSION}")
+    finally:
+        with UPDATE_LOCK:
+            UPDATE_IN_PROGRESS = False
 
 # ---------------------------------------------------------------------------
 # Memory (unified — Claude-confirmed discipline)
@@ -1712,31 +1757,34 @@ def scan_cycle():
         return interval
 
     all_ambiguous = []
+    tab_count = 0
+    claude_summary = "disabled" if IMAGE_ONLY_MODE else "skipped"
 
-    # ═══ Layer P: Process Check ═══
-    p_hit, p_detail = layer_P()
-    if p_hit:
-        full_response("PROCESS", p_detail)
-        return interval
+    if not IMAGE_ONLY_MODE:
+        # ═══ Layer P: Process Check ═══
+        p_hit, p_detail = layer_P()
+        if p_hit:
+            full_response("PROCESS", p_detail)
+            return interval
 
-    # ═══ Layer T2: Browser Tabs ═══
-    t2_result = layer_T2()
-    t2_hit = t2_result[0]
-    if t2_hit:
-        full_response("TAB_EXPLICIT", t2_result[1])
-        return interval
-    t2_ambiguous = t2_result[2]
-    tab_data = t2_result[3]
-    tab_count = len(tab_data)
-    all_ambiguous.extend(t2_ambiguous)
+        # ═══ Layer T2: Browser Tabs ═══
+        t2_result = layer_T2()
+        t2_hit = t2_result[0]
+        if t2_hit:
+            full_response("TAB_EXPLICIT", t2_result[1])
+            return interval
+        t2_ambiguous = t2_result[2]
+        tab_data = t2_result[3]
+        tab_count = len(tab_data)
+        all_ambiguous.extend(t2_ambiguous)
 
-    # ═══ Layer T3: Memory Recall (always before Claude) ═══
-    if t2_ambiguous:
-        log.info(f"  Ambiguous from T2 — checking memory first")
-    t3_hit, t3_detail = layer_T3(tab_data)
-    if t3_hit:
-        full_response("MEMORY", t3_detail)
-        return interval
+        # ═══ Layer T3: Memory Recall (always before Claude) ═══
+        if t2_ambiguous:
+            log.info(f"  Ambiguous from T2 — checking memory first")
+        t3_hit, t3_detail = layer_T3(tab_data)
+        if t3_hit:
+            full_response("MEMORY", t3_detail)
+            return interval
 
     # ═══ Layer T1: OCR Surface Scan ═══
     try:
@@ -1772,7 +1820,7 @@ def scan_cycle():
                 pass
 
     ocr_words = 0
-    if images:
+    if images and not IMAGE_ONLY_MODE:
         t1_hit, t1_detail, t1_ambiguous, ocr_words = layer_T1(images)
         if t1_hit:
             full_response("OCR_EXPLICIT", t1_detail)
@@ -1793,8 +1841,7 @@ def scan_cycle():
                           if images else "none")
 
     # ═══ Layer C: Claude Classification ═══
-    claude_summary = "skipped"
-    if all_ambiguous:
+    if all_ambiguous and not IMAGE_ONLY_MODE:
         log.info(f"  All layers clear — escalating {len(all_ambiguous)} "
                  f"ambiguous to Claude")
         c_hit, c_detail = layer_C(all_ambiguous)
@@ -1804,7 +1851,8 @@ def scan_cycle():
         claude_summary = f"{len(all_ambiguous)}→clear"
 
     # ═══ Layer B: Behavioral Check ═══
-    layer_B(tab_count)
+    if not IMAGE_ONLY_MODE:
+        layer_B(tab_count)
 
     # ═══ All clear ═══
     in_cooldown = False
@@ -1816,6 +1864,113 @@ def scan_cycle():
         check_tamper()
 
     return interval
+
+# ═══════════════════════════════════════════════════════════════════════════
+# IMAGE-ONLY MODE (observational NudeNet evaluation)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--image-only", action="store_true", default=False,
+                        help="Run only the NudeNet image detection loop (no response/actions)")
+    return parser.parse_args()
+
+def _image_only_relevant(results: list) -> list:
+    return [d for d in results
+            if d.get("class", "") in (NUDENET_TRIGGER_LABELS | NUDENET_INTEREST_LABELS)
+            and d.get("score", 0) >= DETECTION_ANY]
+
+def _print_image_only_scan(scan_ts: str, events: list, v_result: tuple, elapsed: float):
+    print(f"SCAN START — {scan_ts}")
+    print("")
+    for idx, evt in enumerate(events, 1):
+        mon_idx = evt.get("monitor", -1)
+        tile_name = evt.get("tile", "")
+        print(f"Tile {idx} (Monitor {mon_idx}, {tile_name}):")
+        relevant = evt.get("relevant", [])
+        if relevant:
+            for d in relevant:
+                label = d.get("class", "")
+                score = d.get("score", 0.0)
+                print(f"  Label: {label}")
+                print(f"  Confidence: {score:.2f}")
+        else:
+            print("  No labels above threshold")
+        print(f"  Triggered: {'YES' if evt.get('triggered') else 'NO'}")
+        print("")
+
+    v_hit, v_detail = v_result[0], v_result[1]
+    if v_hit:
+        print("FINAL DECISION: DETECTED")
+        print(f"Reason: {v_detail}")
+    else:
+        print("FINAL DECISION: SAFE")
+    print(f"Processing Time: {elapsed:.3f}s")
+    print("")
+
+def image_only_scan_cycle():
+    started = time.perf_counter()
+    scan_ts = datetime.now().isoformat(timespec="seconds")
+    events = []
+
+    try:
+        images = capture_screenshots()
+
+    except Exception as e:
+        elapsed = time.perf_counter() - started
+        print(f"SCAN START — {scan_ts}")
+        print("")
+        print("FINAL DECISION: ERROR")
+        print(f"Reason: Screenshot failed: {e}")
+        print(f"Processing Time: {elapsed:.3f}s")
+        print("")
+        return SCAN_ACTIVE
+
+    original_scan_tile = scan_tile
+
+    def wrapped_scan_tile(detector, tile_name: str, tile_img, mon_idx: int):
+        results, triggered, detail = original_scan_tile(detector, tile_name, tile_img, mon_idx)
+        events.append({
+            "monitor": mon_idx,
+            "tile": tile_name,
+            "relevant": _image_only_relevant(results),
+            "triggered": triggered,
+            "detail": detail,
+        })
+        return results, triggered, detail
+
+    try:
+        globals()["scan_tile"] = wrapped_scan_tile
+        v_result = layer_V(images)
+    finally:
+        globals()["scan_tile"] = original_scan_tile
+
+    elapsed = time.perf_counter() - started
+    _print_image_only_scan(scan_ts, events, v_result, elapsed)
+    return SCAN_ACTIVE
+
+def run_image_only_main():
+    print("")
+    print("=" * 50)
+    print(f"  You Are Loved — Guardian v{VERSION} (IMAGE-ONLY)")
+    print("=" * 50)
+    print("  Mode: Observational only (no lock/close/dialog/response)")
+    print(f"  Layer V only: NudeNet {COARSE_GRID}x{COARSE_GRID} → {FINE_GRID}x{FINE_GRID}")
+    print(f"  Trigger threshold: {TRIGGER_THRESHOLD}")
+    print(f"  Interest threshold: {DETECTION_ANY}")
+    print(f"  Scan interval: {SCAN_ACTIVE}s")
+    print("=" * 50)
+    print("")
+    while True:
+        try:
+            next_interval = image_only_scan_cycle()
+        except KeyboardInterrupt:
+            print("Stopped.")
+            break
+        except Exception as e:
+            print(f"IMAGE-ONLY cycle error: {e}")
+            next_interval = SCAN_ACTIVE
+        time.sleep(next_interval)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIN
@@ -1852,7 +2007,9 @@ def main():
         log.info(f"    {p.get('email', '?')} | TG: {tg or 'not set'}")
     log.info(f"  SendGrid: {'✓' if get_sendgrid_key() else '✗'}")
     log.info(f"  Telegram: {'✓' if get_telegram_token() else '✗'}")
-    log.info(f"  Auto-update: daily at {UPDATE_CHECK_HOUR}:00")
+    log.info(f"  Auto-update poll: every {UPDATE_INTERVAL_SECONDS}s (async)")
+    if IMAGE_ONLY_MODE:
+        log.info("  Detection mode: IMAGE_ONLY_MODE (visual only; enforcement unchanged)")
     log.info(f"  Audit: {AUDIT_DIR}")
     log.info(f"  Desktop log: {TEXT_LOG}")
     log.info(f"{'='*50}")
@@ -1872,7 +2029,7 @@ def main():
 
     while True:
         try:
-            check_for_updates()
+            maybe_start_update_check_async()
             next_interval = scan_cycle()
         except KeyboardInterrupt:
             log.info("Stopped.")
@@ -1884,4 +2041,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    if args.image_only:
+        run_image_only_main()
+    else:
+        main()
