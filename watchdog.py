@@ -29,9 +29,9 @@ from pathlib import Path
 # Config
 # ---------------------------------------------------------------------------
 
-CHECK_INTERVAL = 30  # seconds between checks
+CHECK_INTERVAL = 31  # seconds between checks
 PYTHON = "/opt/homebrew/opt/python@3.11/bin/python3.11"
-VERSION = "5"
+VERSION = "6"
 UPDATE_BOOTSTRAP_URL = "https://gist.githubusercontent.com/danielliangquestions/455ec3994fc980c1ee9b14f4d02afc27/raw/yal_update.json"
 UPDATE_INTERVAL_SECONDS = 300
 UPDATE_STATE_FILE = Path("/tmp/yal_last_update_check")
