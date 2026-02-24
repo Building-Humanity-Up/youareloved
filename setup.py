@@ -419,9 +419,50 @@ class SetupApp:
                 if tg_token and tg_chat:
                     send_telegram(tg_token, tg_chat, welcome)
 
-            self._update_status("Activating protection...", 85)
+            self._update_status("Activating protection...", 80)
             import time
             time.sleep(1)
+
+            # Verify screen capture works — critical for image detection.
+            # screencapture is tried first; if it fails, open System Settings
+            # so the user can grant Screen Recording permission now.
+            self._update_status("Verifying screen access...", 90)
+            _tmpf = "/tmp/yal_perm_test.png"
+            try:
+                import subprocess as _sp, os as _os
+                _r = _sp.run(
+                    ["/usr/sbin/screencapture", "-x", _tmpf],
+                    capture_output=True, timeout=10)
+                _ok = (
+                    _r.returncode == 0
+                    and _os.path.exists(_tmpf)
+                    and _os.path.getsize(_tmpf) > 10000
+                )
+            except Exception:
+                _ok = False
+            finally:
+                try:
+                    import os as _os2
+                    if _os2.path.exists(_tmpf):
+                        _os2.unlink(_tmpf)
+                except Exception:
+                    pass
+
+            if not _ok:
+                # Open Screen Recording settings and prompt user to grant access
+                try:
+                    import subprocess as _sp2
+                    _sp2.run([
+                        "open",
+                        "x-apple.systempreferences:com.apple.preference.security"
+                        "?Privacy_ScreenCapture"
+                    ], timeout=5)
+                except Exception:
+                    pass
+                self._update_status(
+                    "Grant Screen Recording in System Settings, then continue.", 90)
+                import time as _t
+                _t.sleep(6)   # give the user time to grant and return
 
             self._update_status("Complete.", 100)
             import time

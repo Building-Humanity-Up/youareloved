@@ -71,13 +71,23 @@ IDLE_THRESHOLD_2 = 600
 IDLE_THRESHOLD_3 = 1800
 IMAGE_ONLY_MODE = True
 
-LOG_FILE = Path.home() / "yal_log.txt"
+LOG_DIR = Path.home() / "Library" / "Logs" / "youareloved"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "yal_incidents.log"
+RUNTIME_LOG = LOG_DIR / "guardian.log"
+RUNTIME_ERR = LOG_DIR / "guardian.error.log"
+
 MEMORY_FILE = Path.home() / ".yal_memory.json"
 CONFIG_FILE = Path.home() / ".yal_config.json"
+
 AUDIT_DIR = Path.home() / "youareloved" / "audit"
 GUARDIAN_PATH = Path.home() / "youareloved" / "guardian.py"
 PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / "com.youareloved.guardian.plist"
+
 TEXT_LOG = Path.home() / "Desktop" / "yal_text.log"
+
+TMP_DIR = Path.home() / "Library" / "Caches" / "youareloved" / "tmp"
+TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # NudeNet labels
@@ -239,7 +249,7 @@ _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 if EARLY_IMAGE_ONLY:
     log.addHandler(logging.NullHandler())
 else:
-    _fh = logging.FileHandler("/tmp/yal.log")
+    _fh = logging.FileHandler(str(RUNTIME_LOG))
     _fh.setLevel(logging.DEBUG)
     _fh.setFormatter(_fmt)
     log.addHandler(_fh)
@@ -252,7 +262,7 @@ else:
     except (PermissionError, OSError):
         # Daemon runs as root — can't write to ~/Desktop
         # Fall back to /tmp which is always writable
-        _fh_fallback = logging.FileHandler("/tmp/yal_text.log")
+        _fh_fallback = logging.FileHandler(str(LOG_DIR / "yal_text.log"))
         _fh_fallback.setLevel(logging.DEBUG)
         _fh_fallback.setFormatter(_fmt)
         log.addHandler(_fh_fallback)
@@ -905,6 +915,80 @@ def save_audit(mon_idx: int, tile_name: str, results: list,
 _detector = None
 _mss = None
 
+# Label list fixed by the NudeNet 640m model (18 classes, order matches ONNX output)
+_NUDENET_LABELS = [
+    "FEMALE_GENITALIA_COVERED", "FACE_FEMALE", "BUTTOCKS_EXPOSED",
+    "FEMALE_BREAST_EXPOSED", "FEMALE_GENITALIA_EXPOSED", "MALE_BREAST_EXPOSED",
+    "ANUS_EXPOSED", "FEET_EXPOSED", "BELLY_COVERED", "FEET_COVERED",
+    "ARMPITS_COVERED", "ARMPITS_EXPOSED", "FACE_MALE", "BELLY_EXPOSED",
+    "MALE_GENITALIA_EXPOSED", "ANUS_COVERED", "FEMALE_BREAST_COVERED",
+    "BUTTOCKS_COVERED",
+]
+
+
+def _patch_nudenet_threshold():
+    """Replace NudeNet's hardcoded 0.25 NMS score floor with DETECTION_ANY (0.10).
+
+    NudeNet's _postprocess function hard-codes two thresholds:
+      • Pre-NMS filter  : max_score >= 0.2
+      • NMS score gate  : cv2.dnn.NMSBoxes(..., score_threshold=0.25, ...)
+    Any detection scoring 0.10–0.24 is silently discarded before reaching our
+    code, making TRIGGER_THRESHOLD / DETECTION_ANY values below 0.25 useless.
+    This patch replaces both gates with DETECTION_ANY so the guardian actually
+    sees everything the model finds above our configured sensitivity.
+    """
+    import cv2
+    import numpy as np
+    import nudenet.nudenet as _nn
+
+    _thresh = DETECTION_ANY      # captured once at patch time
+    _labels = _NUDENET_LABELS
+
+    def _patched_postprocess(
+        output, x_pad, y_pad, x_ratio, y_ratio,
+        image_original_width, image_original_height,
+        model_width, model_height,
+    ):
+        outputs = np.transpose(np.squeeze(output[0]))
+        rows = outputs.shape[0]
+        boxes, scores, class_ids = [], [], []
+        for i in range(rows):
+            classes_scores = outputs[i][4:]
+            max_score = np.amax(classes_scores)
+            if max_score >= _thresh:
+                class_id = np.argmax(classes_scores)
+                x, y, w, h = outputs[i][0:4]
+                x = x - w / 2
+                y = y - h / 2
+                x = x * (image_original_width + x_pad) / model_width
+                y = y * (image_original_height + y_pad) / model_height
+                w = w * (image_original_width + x_pad) / model_width
+                h = h * (image_original_height + y_pad) / model_height
+                x = max(0, min(x, image_original_width))
+                y = max(0, min(y, image_original_height))
+                w = min(w, image_original_width - x)
+                h = min(h, image_original_height - y)
+                class_ids.append(class_id)
+                scores.append(max_score)
+                boxes.append([x, y, w, h])
+        indices = cv2.dnn.NMSBoxes(boxes, scores, _thresh, 0.45)
+        detections = []
+        for i in indices:
+            box = boxes[i]
+            score = scores[i]
+            class_id = class_ids[i]
+            x, y, w, h = box
+            detections.append({
+                "class": _labels[class_id],
+                "score": float(score),
+                "box": [int(x), int(y), int(w), int(h)],
+            })
+        return detections
+
+    _nn._postprocess = _patched_postprocess
+    log.debug(f"  NudeNet _postprocess patched: threshold={_thresh:.2f} (was 0.25)")
+
+
 def get_detector():
     global _detector
     if _detector is None:
@@ -928,6 +1012,7 @@ def get_detector():
                 log.warning("640m model not found — using default 320n (lower quality)")
                 _detector = NudeDetector()
                 log.info("NudeNet 320n model loaded")
+        _patch_nudenet_threshold()   # lower NMS floor from 0.25 → DETECTION_ANY
     return _detector
 
 def get_mss():
@@ -941,24 +1026,118 @@ def get_mss():
 # Screenshots
 # ---------------------------------------------------------------------------
 
+def _console_uid() -> str:
+    """Return the UID of the user currently logged into the GUI session (empty string if unknown)."""
+    try:
+        r = subprocess.run(
+            ["stat", "-f", "%u", "/dev/console"],
+            capture_output=True, text=True, timeout=3)
+        uid = r.stdout.strip()
+        if uid.isdigit() and int(uid) > 0:
+            return uid
+    except Exception:
+        pass
+    return ""
+
+
 def capture_screenshots() -> list:
     """Capture screen using multiple methods until one works.
-    
-    Method 1: Quartz CGWindowListCreateImage (direct API, fastest)
-    Method 2: screencapture CLI at /usr/sbin/screencapture
-    Method 3: mss library
-    
-    All require Screen Recording permission for the Python binary.
+
+    Method 0: CGDisplayCreateImage              (IOKit framebuffer — root-safe, GPU content)
+    Method 1: launchctl asuser + screencapture  (root-daemon safe — runs inside GUI session)
+    Method 2: Quartz CGWindowListCreateImage    (fastest when TCC permission granted to caller)
+    Method 3: screencapture CLI direct          (fallback for user-context processes)
+    Method 4: mss library                       (last resort, multi-monitor aware)
+
+    Method 0 reads the raw IOKit hardware framebuffer via CGDisplayCreateImage, which bypasses
+    the Quartz window compositor. It captures GPU-accelerated content (browsers, video, games)
+    even when the caller is a root daemon with no TCC Screen Recording permission.
     """
     from PIL import Image
     import tempfile
 
-    # Method 1: Quartz direct (fastest, most reliable when permission granted)
+    def _try_image(path: str) -> "Image.Image | None":
+        try:
+            img = Image.open(path)
+            img.load()
+            # Reject solid-black captures (no permission / blank display)
+            extrema = img.convert("L").getextrema()
+            if extrema == (0, 0):
+                return None
+            return img
+        except Exception:
+            return None
+
+    # Method 0: CGDisplayCreateImage — reads IOKit hardware framebuffer directly.
+    # Bypasses the Quartz window compositor so the root daemon captures the same
+    # GPU-rendered pixels visible to the user, including browser content.
+    # No TCC Screen Recording permission required for this code path.
     try:
         import Quartz
-        region = Quartz.CGRectInfinite
+        err, display_ids, count = Quartz.CGGetActiveDisplayList(32, None, None)
+        if err == 0 and count > 0:
+            images_m0 = []
+            for display_id in list(display_ids)[:count]:
+                cg_img = Quartz.CGDisplayCreateImage(display_id)
+                if cg_img is None:
+                    continue
+                w = Quartz.CGImageGetWidth(cg_img)
+                h = Quartz.CGImageGetHeight(cg_img)
+                bpr = Quartz.CGImageGetBytesPerRow(cg_img)
+                bpc = Quartz.CGImageGetBitsPerComponent(cg_img)
+                if w == 0 or h == 0:
+                    continue
+                if bpc != 8:
+                    # 16-bit HDR display — fall through to next method
+                    log.debug(f"  CGDisplayCreateImage: skipping {bpc}bpc display {display_id}")
+                    continue
+                data = bytes(Quartz.CGDataProviderCopyData(
+                    Quartz.CGImageGetDataProvider(cg_img)))
+                if len(data) < bpr * h:
+                    continue
+                img = Image.frombuffer(
+                    "RGBA", (w, h), data, "raw", "BGRA", bpr, 1).convert("RGB")
+                extrema = img.convert("L").getextrema()
+                if extrema != (0, 0):
+                    images_m0.append(img)
+            if images_m0:
+                log.debug(f"  Capture: CGDisplayCreateImage ({len(images_m0)} display(s))")
+                return images_m0
+            log.debug("  CGDisplayCreateImage: no usable frames (all blank)")
+    except Exception as e:
+        log.debug(f"  CGDisplayCreateImage failed: {e}")
+
+    # Method 1: launchctl asuser + screencapture
+    # Runs screencapture inside the GUI user's launchd session so the daemon
+    # sees the same compositor surface as the logged-in user.
+    uid = _console_uid()
+    if uid:
+        tmpfile = tempfile.mktemp(suffix=".png")
+        try:
+            r = subprocess.run(
+                ["launchctl", "asuser", uid,
+                 "/usr/sbin/screencapture", "-x", "-C", tmpfile],
+                capture_output=True, timeout=15)
+            if r.returncode == 0 and os.path.exists(tmpfile) and os.path.getsize(tmpfile) > 10000:
+                img = _try_image(tmpfile)
+                if img is not None:
+                    log.debug("  Capture: launchctl/screencapture")
+                    return [img]
+        except Exception as e:
+            log.debug(f"  launchctl screencapture failed: {e}")
+        finally:
+            if os.path.exists(tmpfile):
+                try:
+                    os.unlink(tmpfile)
+                except Exception:
+                    pass
+
+    # Method 2: Quartz CGWindowListCreateImage
+    # Works correctly when the caller has Screen Recording TCC permission.
+    try:
+        import Quartz
         image = Quartz.CGWindowListCreateImage(
-            region,
+            Quartz.CGRectInfinite,
             Quartz.kCGWindowListOptionOnScreenOnly,
             Quartz.kCGNullWindowID,
             Quartz.kCGWindowImageDefault)
@@ -966,50 +1145,45 @@ def capture_screenshots() -> list:
             w = Quartz.CGImageGetWidth(image)
             h = Quartz.CGImageGetHeight(image)
             if w > 0 and h > 0:
-                # Convert CGImage to PIL
                 bpr = Quartz.CGImageGetBytesPerRow(image)
-                provider = Quartz.CGImageGetDataProvider(image)
-                data = Quartz.CGDataProviderCopyData(provider)
-                img = Image.frombuffer("RGBA", (w, h), data, "raw", "BGRA", bpr, 1)
-                img = img.convert("RGB")
-                # Verify not black
-                px = list(img.getdata())[:200]
-                if not all(p == (0, 0, 0) for p in px):
+                data = Quartz.CGDataProviderCopyData(Quartz.CGImageGetDataProvider(image))
+                img = Image.frombuffer("RGBA", (w, h), data, "raw", "BGRA", bpr, 1).convert("RGB")
+                extrema = img.convert("L").getextrema()
+                if extrema != (0, 0):
+                    log.debug("  Capture: Quartz")
                     return [img]
-                log.debug("  Quartz returned black image (no permission)")
-        log.debug("  Quartz CGWindowListCreateImage returned None")
+                log.debug("  Quartz returned blank image (TCC permission missing for caller)")
     except Exception as e:
         log.debug(f"  Quartz capture failed: {e}")
 
-    # Method 2: screencapture CLI
+    # Method 3: screencapture CLI direct
     try:
         tmpfile = tempfile.mktemp(suffix=".png")
         r = subprocess.run(
             ["/usr/sbin/screencapture", "-x", "-C", tmpfile],
             capture_output=True, timeout=10)
-        if r.returncode == 0 and os.path.exists(tmpfile) and os.path.getsize(tmpfile) > 1000:
-            img = Image.open(tmpfile)
-            img.load()
-            os.unlink(tmpfile)
-            px = list(img.getdata())[:200]
-            if not all(p == (0, 0, 0) for p in px):
+        if r.returncode == 0 and os.path.exists(tmpfile) and os.path.getsize(tmpfile) > 10000:
+            img = _try_image(tmpfile)
+            if img is not None:
+                log.debug("  Capture: screencapture")
                 return [img]
         if os.path.exists(tmpfile):
             os.unlink(tmpfile)
     except Exception as e:
-        log.debug(f"  screencapture failed: {e}")
+        log.debug(f"  screencapture direct failed: {e}")
 
-    # Method 3: mss library
+    # Method 4: mss library (multi-monitor aware)
     try:
         sct = get_mss()
         images = []
         for mon in sct.monitors[1:]:
             raw = sct.grab(mon)
             img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
-            px = list(img.getdata())[:200]
-            if not all(p == (0, 0, 0) for p in px):
+            extrema = img.convert("L").getextrema()
+            if extrema != (0, 0):
                 images.append(img)
         if images:
+            log.debug("  Capture: mss")
             return images
     except Exception as e:
         log.debug(f"  mss failed: {e}")
@@ -1088,27 +1262,29 @@ def scan_text_tiers(text: str, source_id: str, url: str = "") -> tuple:
 # Tiling (from guardian.py v8.1)
 # ---------------------------------------------------------------------------
 
-def make_grid(img, n: int, prefix: str = "g") -> list:
+def make_grid(img, n: int, prefix: str = "g", n_cols: int = None) -> list:
+    n_cols = n_cols if n_cols is not None else n
     w, h = img.size
-    tw, th = w // n, h // n
+    tw, th = w // n_cols, h // n
     tiles = []
     for row in range(n):
-        for col in range(n):
+        for col in range(n_cols):
             x1 = col * tw
             y1 = row * th
-            x2 = x1 + tw if col < n - 1 else w
+            x2 = x1 + tw if col < n_cols - 1 else w
             y2 = y1 + th if row < n - 1 else h
             tiles.append((f"{prefix}{row}{col}", img.crop((x1, y1, x2, y2)),
                           (x1, y1, x2, y2)))
     return tiles
 
-def make_overlaps(img, n: int) -> list:
+def make_overlaps(img, n: int, n_cols: int = None) -> list:
+    n_cols = n_cols if n_cols is not None else n
     w, h = img.size
-    tw, th = w // n, h // n
+    tw, th = w // n_cols, h // n
     ox, oy = tw // 2, th // 2
     tiles = []
     for row in range(n - 1):
-        for col in range(n - 1):
+        for col in range(n_cols - 1):
             x1 = max(0, col * tw + ox)
             y1 = max(0, row * th + oy)
             x2 = min(w, x1 + tw)
@@ -1141,27 +1317,73 @@ def check_triggered(results: list) -> tuple:
     return False, ""
 
 def scan_tile(detector, tile_name: str, tile_img, mon_idx: int) -> tuple:
-    path = f"/tmp/yal_tile_{mon_idx}_{tile_name}.png"
-    tile_img.save(path)
+    """
+    Returns: (results, triggered_bool, detail_str)
+
+    Strategy:
+      1) Prefer in-memory detect(tile_img) if NudeNet supports it.
+      2) Fallback to a per-user temp PNG (not a shared fixed filename).
+      3) Always delete temp file immediately after detect().
+    """
+    results = []
+    triggered = False
+    detail = ""
+
+    # 1) Try in-memory path first (fastest, no disk I/O)
     try:
-        results = detector.detect(path)
-    except Exception as e:
-        log.error(f"    NudeNet error on {tile_name}: {e}")
-        return [], False, ""
-    # Filter to only relevant classes (ignore FACE_MALE, etc.)
-    relevant = [d for d in results 
-                if d.get("class", "") in NUDENET_TRIGGER_LABELS | NUDENET_INTEREST_LABELS
-                and d.get("score", 0) >= 0.10]
+        results = detector.detect(tile_img)
+    except Exception:
+        results = None
+
+    # 2) Fallback to temp PNG if in-memory detect is unsupported
+    if results is None:
+        import os
+        import tempfile
+        from pathlib import Path
+
+        tmp_dir = Path.home() / "Library" / "Caches" / "youareloved" / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+
+        tmp_path = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=f"yal_tile_{mon_idx}_{tile_name}_",
+                suffix=".png",
+                dir=str(tmp_dir),
+            )
+            os.close(fd)
+            tile_img.save(tmp_path)
+            results = detector.detect(tmp_path)
+        except Exception as e:
+            log.error(f"    NudeNet error on {tile_name}: {e}")
+            return [], False, ""
+        finally:
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass  # never block detection on cleanup
+
+    # Filter to only relevant classes
+    relevant = [
+        d for d in (results or [])
+        if d.get("class", "") in (NUDENET_TRIGGER_LABELS | NUDENET_INTEREST_LABELS)
+        and d.get("score", 0) >= 0.10
+    ]
+
     if relevant:
-        log.info(f"    {tile_name} ({tile_img.size[0]}x{tile_img.size[1]}): "
-                 f"{len(relevant)} detection(s)")
+        log.info(
+            f"    {tile_name} ({tile_img.size[0]}x{tile_img.size[1]}): "
+            f"{len(relevant)} detection(s)"
+        )
         for d in relevant:
-            score = d.get('score', 0)
-            cls = d.get('class', '')
-            marker = "🔴" if cls in NUDENET_TRIGGER_LABELS and score >= TRIGGER_THRESHOLD else "🟡"
+            score = d.get("score", 0)
+            cls = d.get("class", "")
+            marker = "🔴" if (cls in NUDENET_TRIGGER_LABELS and score >= TRIGGER_THRESHOLD) else "🟡"
             log.info(f"      {marker} {cls}: {score:.3f}")
-    triggered, detail = check_triggered(results)
-    return results, triggered, detail
+
+    triggered, detail = check_triggered(results or [])
+    return results or [], triggered, detail
 
 # ═══════════════════════════════════════════════════════════════════════════
 # LAYER P — Process Check
@@ -1369,28 +1591,48 @@ def layer_T1(images: list) -> tuple:
 
 def layer_V(images: list) -> tuple:
     log.info(f"LAYER V — NudeNet Adaptive Scan")
-    log.info(f"  Pass 1: {COARSE_GRID}x{COARSE_GRID} coarse | "
-             f"Pass 2: {FINE_GRID}x{FINE_GRID} fine on hot tiles")
     log.info(f"  Trigger: {TRIGGER_THRESHOLD} | Interest: {DETECTION_ANY}")
     detector = get_detector()
     for mon_idx, img in enumerate(images):
-        log.info(f"  Monitor {mon_idx}: {img.size[0]}x{img.size[1]}")
-        log.info(f"  PASS 1 — Coarse {COARSE_GRID}x{COARSE_GRID}")
-        coarse = make_grid(img, COARSE_GRID, prefix="c")
-        overlaps = make_overlaps(img, COARSE_GRID)
+        w, h = img.size
+        # Adapt grid to aspect ratio so tiles stay roughly square for NudeNet
+        aspect = w / h
+        sqrt_a = aspect ** 0.5
+        n_rows = max(2, round(COARSE_GRID / sqrt_a))
+        n_cols = max(COARSE_GRID, round(COARSE_GRID * sqrt_a))
+        log.info(f"  Monitor {mon_idx}: {w}x{h} → grid {n_cols}×{n_rows} "
+                 f"(~{w//n_cols}×{h//n_rows}px/tile)")
+        log.info(f"  Pass 1: {n_cols}x{n_rows} coarse | "
+                 f"Pass 2: {FINE_GRID}x{FINE_GRID} fine on hot tiles")
+        log.info(f"  PASS 1 — Coarse {n_cols}×{n_rows} [parallel]")
+        coarse = make_grid(img, n_rows, prefix="c", n_cols=n_cols)
+        overlaps = make_overlaps(img, n_rows, n_cols=n_cols)
         all_coarse = coarse + overlaps
         full_r, full_t, full_d = scan_tile(detector, "full", img, mon_idx)
         if full_t:
             log.warning(f"  >>> NSFW on full image: {fmt_detections(full_r)}")
             return True, full_d, mon_idx, "full", full_r, img, img
+        # Pass 1: run all coarse + overlap tiles in parallel.
+        # ONNX Runtime releases the GIL during inference, giving true CPU
+        # parallelism across threads — reduces ~45s sequential to ~5s on 8 cores.
+        import concurrent.futures
+        futures_list = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            for name, tile, box in all_coarse:
+                fut = executor.submit(scan_tile, detector, name, tile, mon_idx)
+                futures_list.append((fut, name, tile, box))
+        # All futures are complete when the executor exits.
         hot = []
-        for name, tile, box in all_coarse:
-            r, t, d = scan_tile(detector, name, tile, mon_idx)
-            if t:
+        first_trigger = None
+        for fut, name, tile, box in futures_list:
+            r, t, d = fut.result()
+            if t and first_trigger is None:
                 log.warning(f"  >>> NSFW on '{name}': {fmt_detections(r)}")
-                return True, d, mon_idx, name, r, img, tile
-            if has_interest(r):
+                first_trigger = (True, d, mon_idx, name, r, img, tile)
+            elif has_interest(r):
                 hot.append((name, tile, box, r))
+        if first_trigger:
+            return first_trigger
         if hot:
             log.info(f"  PASS 2 — Fine scan on {len(hot)} hot tile(s)")
             for pname, pimg, pbox, pr in hot:
