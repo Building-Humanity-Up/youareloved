@@ -40,7 +40,7 @@ EARLY_IMAGE_ONLY = "--image-only" in sys.argv[1:]
 # Version & Auto-Update
 # ---------------------------------------------------------------------------
 
-VERSION = "10"
+VERSION = "11"
 
 os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "")
 
@@ -64,13 +64,12 @@ DETECTION_ANY = 0.10
 
 SCAN_ACTIVE = 5
 SCAN_IDLE = 30
-SCAN_DEEP_IDLE = 600
+SCAN_DEEP_IDLE = SCAN_ACTIVE
 SCAN_AWAY_CHECK = 60
 IDLE_THRESHOLD_1 = 60
 IDLE_THRESHOLD_2 = 600
 IDLE_THRESHOLD_3 = 1800
-IMAGE_ONLY_MODE = True
-
+IMAGE_ONLY_MODE = EARLY_IMAGE_ONLY
 LOG_DIR = Path.home() / "Library" / "Logs" / "youareloved"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "yal_incidents.log"
@@ -135,18 +134,18 @@ EXPLICIT_PATTERNS = [
     r'\bmissav\b', r'\bsupjav\b', r'\bjavmost\b', r'\bjavdoe\b',
     r'\bspankbang\b', r'\bmotherless\b', r'\befukt\b',
     r'\beporner\b', r'\btnaflix\b', r'\bdrtuber\b', r'\bfapcat\b',
-    r'\bbabepedia\b', r'\bfreeones\b', r'\biafd\b',
-    r'\bhentaihaven\b', r'\bnhentai\b', r'\brule34\b',
+    r'\bbabepedia\b', r'\bfreeones\b', r'\biafd\b', r'\bgonewild\b',
+    r'\bhentaihaven\b', r'\bnhentai\b', r'\brule34\b', r'\bcockwarmer\b',
     r'\bgelbooru\b', r'\bdanbooru\b',
     r'\bbangbros\b', r'\bmofos\b', r'\brealitykings\b', r'\bxempire\b',
-    r'\bcumshot\b', r'\bcreampie\b',
+    r'\bcumshot\b', r'\bcreampie\b',  r'\basiansgonewild\b'
     r'\banal\b', r'\bblowjob\b', r'\bhandjob\b', r'\bfootjob\b',
-    r'\bgangbang\b', r'\bthreesome\b', r'\borgy\b',
-    r'\bpenetration\b', r'\bintercourse\b',
-    r'\bmasturbat', r'\bfingering\b',
-    r'\bpussy\b', r'\bcock\b', r'\bdick\b',
+    r'\bgangbang\b', r'\bthreesome\b', r'\borgy\b', r'\bf4m\b'
+    r'\bpenetration\b', r'\bintercourse\b', r'\bfellatio\b', r'\bgonewild\b'
+    r'\bmasturbat', r'\bfingering\b', r'\bNSFW\b'
+    r'\bpussy\b', r'\bcock\b', r'\bdick\b', r'\bsoundgasm\b',
     r'\bnipple\b', r'\bareola\b', r'\blabia\b', r'\bscrotum\b',
-    r'\bxxx\b', r'\bnsfw\b',
+    r'\bxxx\b', r'\bnsfw\b', r'\bredgifs\b', r'\borgasm\b',
     r'\bmilf\b', r'\bahegao\b', r'\bdoujin\b',
     r'\bhentai\b', r'\becchi\b', r'\bJAV\b',
     r'\btip\s*menu\b', r'\blovense\b', r'\bcontrol.*toy\b',
@@ -177,10 +176,10 @@ AMBIGUOUS_PATTERNS = [
     r'\bwatch.*sex\b', r'\bfree.*porn\b', r'\bhot.*girl\b',
     r'\bnaked.*girl\b', r'\bnude.*photo\b', r'\bsex.*video\b',
     r'\badult.*content\b', r'\bxxx.*video\b', r'\bporn.*star\b',
-    r'\bmature.*woman\b',
+    r'\bmature.*woman\b', r'\bnsfw\b',
     r'\bonlyfans\s*leak\b', r'\bnude\s*leak\b', r'\bfappening\b',
     r'\bgonewild\b', r'\breddit.*nsfw\b', r'\breddit.*porn\b',
-    r'\bgravure\b', r'\bgravure\s*idol\b', r'\bav\s*idol\b', r'\bidol\b',
+    r'\bgravure\b', r'\bgravure\s*idol\b', r'\bav\s*idol\b', r'\bidol\b', r'\bscrolller\b',
 ]
 
 _EXPLICIT_RE = [re.compile(p, re.IGNORECASE) for p in EXPLICIT_PATTERNS]
@@ -281,7 +280,10 @@ else:
 last_dialog_time: float = 0.0
 last_lock_time: float = 0.0
 scan_count: int = 0
-in_cooldown: bool = False
+
+# Enforcement cooldown: scanning continues, but penalty actions (close/dialog/lock/alerts)
+# are suppressed until this unix timestamp.
+enforcement_until: float = 0.0
 
 # ---------------------------------------------------------------------------
 # Idle Detection
@@ -307,8 +309,10 @@ def seconds_idle() -> float:
 
 def get_scan_mode() -> tuple:
     idle = seconds_idle()
-    if in_cooldown:
-        return "COOLDOWN", SCAN_ACTIVE
+    now = time.time()
+    if now < enforcement_until:
+        remaining = int(enforcement_until - now)
+        return f"COOLDOWN ({remaining}s)", SCAN_ACTIVE
     if idle > IDLE_THRESHOLD_3:
         return f"AWAY ({idle:.0f}s)", SCAN_AWAY_CHECK
     elif idle > IDLE_THRESHOLD_2:
@@ -1590,38 +1594,66 @@ def layer_T1(images: list) -> tuple:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def layer_V(images: list) -> tuple:
-    log.info(f"LAYER V — NudeNet Adaptive Scan")
+    log.info("LAYER V — NudeNet Adaptive Scan")
     log.info(f"  Trigger: {TRIGGER_THRESHOLD} | Interest: {DETECTION_ANY}")
     detector = get_detector()
+
     for mon_idx, img in enumerate(images):
         w, h = img.size
+
         # Adapt grid to aspect ratio so tiles stay roughly square for NudeNet
         aspect = w / h
         sqrt_a = aspect ** 0.5
         n_rows = max(2, round(COARSE_GRID / sqrt_a))
         n_cols = max(COARSE_GRID, round(COARSE_GRID * sqrt_a))
-        log.info(f"  Monitor {mon_idx}: {w}x{h} → grid {n_cols}×{n_rows} "
-                 f"(~{w//n_cols}×{h//n_rows}px/tile)")
-        log.info(f"  Pass 1: {n_cols}x{n_rows} coarse | "
-                 f"Pass 2: {FINE_GRID}x{FINE_GRID} fine on hot tiles")
-        log.info(f"  PASS 1 — Coarse {n_cols}×{n_rows} [parallel]")
-        coarse = make_grid(img, n_rows, prefix="c", n_cols=n_cols)
-        overlaps = make_overlaps(img, n_rows, n_cols=n_cols)
-        all_coarse = coarse + overlaps
+
+        log.info(
+            f"  Monitor {mon_idx}: {w}x{h} → grid {n_cols}×{n_rows} "
+            f"(~{w//n_cols}×{h//n_rows}px/tile)"
+        )
+        log.info(
+            f"  Pass 1: {n_cols}x{n_rows} coarse | "
+            f"Pass 2: {FINE_GRID}x{FINE_GRID} fine on hot tiles"
+        )
+
+        # ─────────────────────────────────────────────────────────────
+        # FAST PASS (mandatory): full-frame evaluation before any tiling
+        # ─────────────────────────────────────────────────────────────
         full_r, full_t, full_d = scan_tile(detector, "full", img, mon_idx)
+
+        # Always surface the best full-frame score (even when empty)
+        # (observability only; does not change detection thresholds)
+        b_cls = "NONE"
+        b_sc = 0.0
+        try:
+            if full_r:
+                best = max(full_r, key=lambda d: d.get("score", 0.0))
+                b_cls = best.get("class", "NONE") or "NONE"
+                b_sc = float(best.get("score", 0.0) or 0.0)
+        except Exception:
+            pass
+        log.info(f"  Full-frame top: {b_cls} {b_sc:.3f} | raw={len(full_r)} triggered={full_t}")
+
         if full_t:
             log.warning(f"  >>> NSFW on full image: {fmt_detections(full_r)}")
             return True, full_d, mon_idx, "full", full_r, img, img
-        # Pass 1: run all coarse + overlap tiles in parallel.
-        # ONNX Runtime releases the GIL during inference, giving true CPU
-        # parallelism across threads — reduces ~45s sequential to ~5s on 8 cores.
+
+        # ─────────────────────────────────────────────────────────────
+        # PASS 1: coarse + overlaps in parallel (unchanged)
+        # ─────────────────────────────────────────────────────────────
+        log.info(f"  PASS 1 — Coarse {n_cols}×{n_rows} [parallel]")
+
+        coarse = make_grid(img, n_rows, prefix="c", n_cols=n_cols)
+        overlaps = make_overlaps(img, n_rows, n_cols=n_cols)
+        all_coarse = coarse + overlaps
+
         import concurrent.futures
         futures_list = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             for name, tile, box in all_coarse:
                 fut = executor.submit(scan_tile, detector, name, tile, mon_idx)
                 futures_list.append((fut, name, tile, box))
-        # All futures are complete when the executor exits.
+
         hot = []
         first_trigger = None
         for fut, name, tile, box in futures_list:
@@ -1631,25 +1663,36 @@ def layer_V(images: list) -> tuple:
                 first_trigger = (True, d, mon_idx, name, r, img, tile)
             elif has_interest(r):
                 hot.append((name, tile, box, r))
+
         if first_trigger:
             return first_trigger
+
+        # ─────────────────────────────────────────────────────────────
+        # PASS 2: fine scan only on hot tiles (unchanged)
+        # ─────────────────────────────────────────────────────────────
         if hot:
             log.info(f"  PASS 2 — Fine scan on {len(hot)} hot tile(s)")
             for pname, pimg, pbox, pr in hot:
-                log.info(f"    Subdividing '{pname}' "
-                         f"({pimg.size[0]}x{pimg.size[1]}) into {FINE_GRID}x{FINE_GRID}")
+                log.info(
+                    f"    Subdividing '{pname}' "
+                    f"({pimg.size[0]}x{pimg.size[1]}) into {FINE_GRID}x{FINE_GRID}"
+                )
                 subs = make_grid(pimg, FINE_GRID, prefix=f"{pname}_f")
                 for sname, simg, sbox in subs:
                     r, t, d = scan_tile(detector, sname, simg, mon_idx)
                     if t:
-                        log.warning(f"  >>> NSFW on '{sname}' (parent: {pname}): "
-                                    f"{fmt_detections(r)}")
+                        log.warning(
+                            f"  >>> NSFW on '{sname}' (parent: {pname}): "
+                            f"{fmt_detections(r)}"
+                        )
                         return True, d, mon_idx, sname, r, img, simg
         else:
-            log.info(f"  PASS 2 — No hot tiles, skipped")
-    log.info(f"  Layer V: CLEAR")
-    return False, "", -1, "", [], None, None
+            log.info("  PASS 2 — No hot tiles, skipped")
 
+    log.info("  Layer V: CLEAR")
+    return False, "", -1, "", [], None, None
+    
+    
 # ═══════════════════════════════════════════════════════════════════════════
 # LAYER C — Claude Contextual Classification (batched)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1857,37 +1900,53 @@ def show_dialog():
 
 def full_response(layer: str, detail: str, mon_idx=-1, tile_name="",
                   results=None, full_img=None, tile_img=None):
-    global in_cooldown
-    log.warning(f"{'='*50}")
-    log.warning(f"INCIDENT: {layer} | {detail}")
-    log.warning(f"{'='*50}")
-    log_incident(layer, detail)
+    global enforcement_until
+    now = time.time()
+    in_cooldown = now < enforcement_until
+
+    # Always log something (so repeated incidents are visible)
+    if in_cooldown:
+        log.warning(f"SUPPRESSED (cooldown active): {layer} | {detail}")
+        log_incident(f"SUPPRESSED_{layer}", detail)
+    else:
+        log.warning(f"{'='*50}")
+        log.warning(f"INCIDENT: {layer} | {detail}")
+        log.warning(f"{'='*50}")
+        log_incident(layer, detail)
 
     url = get_active_url()
     if url:
         log.info(f"RESPONSE: Active URL: {url}")
 
-    # Save audit if visual data available
+    # Always close content, even during cooldown
+    close_nsfw_window()
+
+    # During cooldown: stop here (no alerts/dialog/lock/audit)
+    if in_cooldown:
+        return
+
+    # Save audit if visual data available (only when not in cooldown)
     if full_img and tile_img and mon_idx >= 0:
         if url:
             learn_url_visual(url)
         save_audit(mon_idx, tile_name, results or [], full_img, tile_img,
                    url or "", detail)
 
-    # Fire alerts to all partners (non-blocking background thread)
+    # Fire alerts to all partners (only when not in cooldown)
     fire_alerts(layer, detail, full_img)
 
-    close_nsfw_window()
     show_dialog()
     lock_screen()
-    in_cooldown = True
+
+    # Start/extend enforcement cooldown window
+    enforcement_until = time.time() + LOCK_COOLDOWN
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIN SCAN CYCLE
 # ═══════════════════════════════════════════════════════════════════════════
 
 def scan_cycle():
-    global scan_count, in_cooldown
+    global scan_count
     scan_count += 1
 
     mode, interval = get_scan_mode()
@@ -1899,7 +1958,8 @@ def scan_cycle():
     log.info(f"SCAN #{scan_count} at {ts} | {mode}")
     log.info(f"{'─'*50}")
 
-    if idle > IDLE_THRESHOLD_3 and not in_cooldown:
+    # If user is away, skip active work regardless of cooldown state.
+    if idle > IDLE_THRESHOLD_3:
         log.info(f"  User away — skipping")
         return interval
 
@@ -2002,7 +2062,6 @@ def scan_cycle():
         layer_B(tab_count)
 
     # ═══ All clear ═══
-    in_cooldown = False
     log.info(f"SCAN #{scan_count} COMPLETE — ALL CLEAR | "
              f"process:✓ tabs:{tab_count} ocr:{ocr_words}w "
              f"visual:{visual_summary} claude:{claude_summary}")
