@@ -17,3 +17,6 @@ install_daemon.sh
 yal.sh
 ios/
 *.backup
+
+# local AI worktrees
+.claude/
