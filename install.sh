@@ -117,7 +117,30 @@ if [[ -z "$PYTHON" ]]; then
     exit 1
 fi
 
+# ── Resolve the REAL binary path ─────────────────────────────────────────
+#
+# macOS TCC (Transparency, Consent, and Control) grants Screen Recording
+# permission to the *resolved* binary, not to symlinks pointing at it.
+#
+# Homebrew Python: /opt/homebrew/opt/python@3.11/bin/python3.11
+#   → resolves to: /opt/homebrew/Cellar/python@3.11/3.11.x/Frameworks/
+#                   Python.framework/Versions/3.11/bin/python3.11
+#
+# If the LaunchAgent uses the symlink but macOS granted permission to the
+# resolved path (or vice versa), screen capture silently returns
+# wallpaper-only images — the single hardest bug to diagnose in this project.
+#
+# We resolve once here, use PYTHON_REAL everywhere that matters.
+
+PYTHON_REAL=$("$PYTHON" -c "import os,sys; print(os.path.realpath(sys.executable))" 2>/dev/null)
+if [[ -z "$PYTHON_REAL" ]] || [[ ! -x "$PYTHON_REAL" ]]; then
+    PYTHON_REAL=$(readlink -f "$PYTHON" 2>/dev/null || echo "$PYTHON")
+fi
+
 echo -e "  ${DIM}Python: $PYTHON ($($PYTHON --version 2>&1))${RESET}"
+if [[ "$PYTHON_REAL" != "$PYTHON" ]]; then
+    echo -e "  ${DIM}Binary: $PYTHON_REAL${RESET}"
+fi
 echo -e "  ${DIM}Tesseract: $(command -v tesseract 2>/dev/null || echo 'not found')${RESET}"
 echo -e "  ${DIM}Tkinter: $($PYTHON -c 'import tkinter; print("✓")' 2>/dev/null || echo 'not found')${RESET}"
 
@@ -160,7 +183,6 @@ if [[ ! -f "$MODEL_FILE" ]] || [[ $(stat -f%z "$MODEL_FILE" 2>/dev/null || echo 
     mkdir -p "$MODEL_DIR"
     rm -f "$MODEL_FILE" 2>/dev/null
 
-    # GitHub release assets require Accept header to get binary, not HTML
     DOWNLOAD_OK=false
 
     # Method 1: Python with proper redirect handling (most reliable)
@@ -189,7 +211,7 @@ except Exception as e:
         DOWNLOAD_OK=true
     fi
 
-    # Method 2: curl with GitHub API (handles redirects)
+    # Method 2: curl with redirect following
     if [[ "$DOWNLOAD_OK" != "true" ]]; then
         curl -sL -H "Accept: application/octet-stream" \
             "https://github.com/Building-Humanity-Up/youareloved/releases/download/v0.2.0/640m.onnx" \
@@ -282,99 +304,166 @@ else
     echo -e "  ${DIM}Domain blocks already configured${RESET}"
 fi
 
-# ── macOS permissions ────────────────────────────────────────────────────
+# ── macOS Screen Recording — resolved-path verification ──────────────────
+#
+# This is the most critical permission step. Without it, Guardian captures
+# wallpaper-only images (non-black, but missing all window content) and
+# NudeNet sees nothing. The user thinks protection is working. It isn't.
+#
+# Strategy:
+#   1. Trigger a capture with PYTHON_REAL to pre-populate the TCC list
+#   2. Verify with content-aware check (luminance std-dev, not just non-black)
+#   3. If wallpaper-only: explain the exact binary to enable
+#   4. Gate: don't proceed until verified (with escape valve after many attempts)
 
 echo ""
 echo -e "  ${YELLOW}Setting up screen detection...${RESET}"
 
-# Test if screen capture works from this Python
-SR_OK=$($PYTHON -c "
+# Step 1: Trigger capture attempt with the resolved binary.
+# This causes macOS to add it to the Screen Recording list (toggled OFF).
+# On macOS 14+, user may only need to toggle ON instead of manually adding.
+"$PYTHON_REAL" -c "
 try:
     import Quartz
+    Quartz.CGWindowListCreateImage(
+        Quartz.CGRectInfinite,
+        Quartz.kCGWindowListOptionOnScreenOnly,
+        Quartz.kCGNullWindowID,
+        Quartz.kCGWindowImageDefault)
+except: pass
+" 2>/dev/null
+sleep 1
+
+# Step 2: Content-aware verification function.
+# Returns: "yes" (full desktop), "wallpaper" (non-black but no windows), "no" (failed)
+_verify_screen_capture() {
+    "$PYTHON_REAL" -c "
+import sys
+try:
+    import Quartz
+    from PIL import Image
+
     img = Quartz.CGWindowListCreateImage(
         Quartz.CGRectInfinite,
         Quartz.kCGWindowListOptionOnScreenOnly,
         Quartz.kCGNullWindowID,
         Quartz.kCGWindowImageDefault)
-    if img and Quartz.CGImageGetWidth(img) > 0:
-        provider = Quartz.CGImageGetDataProvider(img)
-        data = Quartz.CGDataProviderCopyData(provider)
-        # Check first few bytes aren't all zero
-        sample = bytes(data[:800])
-        if any(b != 0 for b in sample):
-            print('yes')
-        else:
-            print('no')
+    if not img or Quartz.CGImageGetWidth(img) == 0:
+        print('no'); sys.exit(0)
+
+    w = Quartz.CGImageGetWidth(img)
+    h = Quartz.CGImageGetHeight(img)
+    bpr = Quartz.CGImageGetBytesPerRow(img)
+    provider = Quartz.CGImageGetDataProvider(img)
+    data = bytes(Quartz.CGDataProviderCopyData(provider))
+
+    # Quick black check
+    if all(b == 0 for b in data[:2000]):
+        print('no'); sys.exit(0)
+
+    # Convert to grayscale, sample every 4th pixel for speed.
+    # Measure luminance standard deviation:
+    #   Wallpaper-only: std 15-45 (smooth gradient or solid)
+    #   Desktop with windows (text, UI, mixed content): std 50+
+    pil = Image.frombuffer('RGBA', (w, h), data, 'raw', 'BGRA', bpr, 1).convert('L')
+    pixels = list(pil.getdata())[::4]
+    n = len(pixels)
+    mean = sum(pixels) / n
+    std = (sum((p - mean) ** 2 for p in pixels) / n) ** 0.5
+
+    if std > 45:
+        print('yes')
+    elif std > 3:
+        print('wallpaper')
     else:
         print('no')
-except Exception as e:
+except Exception:
     print('no')
-" 2>/dev/null)
+" 2>/dev/null
+}
 
-if [[ "$SR_OK" != "yes" ]]; then
+SR_OK=$(_verify_screen_capture)
+
+if [[ "$SR_OK" == "yes" ]]; then
+    echo -e "  ${GREEN}✓ Screen Recording: working${RESET}"
+else
     echo ""
     echo -e "  ${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo -e "  ${YELLOW}  One quick step — Screen Recording${RESET}"
     echo -e "  ${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
+
+    # Copy resolved path to clipboard
+    echo -n "$PYTHON_REAL" | pbcopy 2>/dev/null || true
+
     echo -e "  ${DIM}  System Settings will open to Screen Recording.${RESET}"
-    echo -e "  ${DIM}  Click the ${BOLD}+${RESET}${DIM} button at the bottom, then:${RESET}"
-    echo -e "  ${DIM}  Press ${BOLD}Cmd+Shift+G${RESET}${DIM} and paste this path:${RESET}"
     echo ""
-    echo -e "  ${BOLD}  $PYTHON${RESET}"
+    echo -e "  ${DIM}  Look for ${BOLD}Python${RESET}${DIM} in the list and toggle it ${BOLD}ON${RESET}${DIM}.${RESET}"
     echo ""
-    echo -e "  ${DIM}  Click Open, then make sure it's toggled ${BOLD}ON${RESET}${DIM}.${RESET}"
+    echo -e "  ${DIM}  If Python isn't listed:${RESET}"
+    echo -e "  ${DIM}  Click ${BOLD}+${RESET}${DIM} at the bottom, press ${BOLD}Cmd+Shift+G${RESET}${DIM},${RESET}"
+    echo -e "  ${DIM}  then ${BOLD}Cmd+V${RESET}${DIM} to paste the path, and click Open.${RESET}"
+    echo ""
+    echo -e "  ${DIM}  Path (copied to clipboard):${RESET}"
+    echo -e "  ${BOLD}  $PYTHON_REAL${RESET}"
     echo ""
 
     open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture" 2>/dev/null || true
     sleep 1
     osascript -e 'tell application "System Settings" to activate' 2>/dev/null || true
 
-    for attempt in 1 2 3 4 5; do
-        echo -e "  ${YELLOW}  Press Enter after adding Python...${RESET}"
+    for attempt in $(seq 1 10); do
+        echo -e "  ${YELLOW}  Press Enter after enabling it...${RESET}"
         read -r
 
-        SR_OK=$($PYTHON -c "
-try:
-    import Quartz
-    img = Quartz.CGWindowListCreateImage(
-        Quartz.CGRectInfinite,
-        Quartz.kCGWindowListOptionOnScreenOnly,
-        Quartz.kCGNullWindowID,
-        Quartz.kCGWindowImageDefault)
-    if img and Quartz.CGImageGetWidth(img) > 0:
-        provider = Quartz.CGImageGetDataProvider(img)
-        data = Quartz.CGDataProviderCopyData(provider)
-        sample = bytes(data[:800])
-        print('yes' if any(b != 0 for b in sample) else 'no')
-    else: print('no')
-except: print('no')
-" 2>/dev/null)
+        SR_OK=$(_verify_screen_capture)
+
         if [[ "$SR_OK" == "yes" ]]; then
             echo -e "  ${GREEN}✓ Screen Recording: working${RESET}"
             break
         fi
 
-        if [[ "$attempt" -lt 5 ]]; then
-            echo -e "  ${RED}  Not working yet.${RESET}"
-            echo -e "  ${DIM}  Make sure you added: $PYTHON${RESET}"
-            echo -e "  ${DIM}  and toggled it ON. You may need to restart Terminal.${RESET}"
+        # Refresh clipboard in case user copied something else
+        echo -n "$PYTHON_REAL" | pbcopy 2>/dev/null || true
+
+        if [[ "$SR_OK" == "wallpaper" ]]; then
+            # The critical diagnostic: permission granted to wrong binary.
+            echo ""
+            echo -e "  ${RED}  Almost — screen capture is returning only the wallpaper.${RESET}"
+            echo -e "  ${DIM}  This usually means the wrong Python entry is enabled.${RESET}"
+            echo ""
+            echo -e "  ${DIM}  Please make sure this exact binary is in the list:${RESET}"
+            echo -e "  ${BOLD}  $PYTHON_REAL${RESET}"
+            echo ""
+            if [[ "$PYTHON_REAL" != "$PYTHON" ]]; then
+                echo -e "  ${DIM}  If you see a shorter path like:${RESET}"
+                echo -e "  ${DIM}  $PYTHON${RESET}"
+                echo -e "  ${DIM}  remove it, then add the full path above (it's in your clipboard).${RESET}"
+                echo ""
+            fi
         else
-            echo -e "  ${YELLOW}  ⚠ Screen Recording not confirmed.${RESET}"
-            echo -e "  ${YELLOW}  Guardian will remind you until it's fixed.${RESET}"
+            echo -e "  ${RED}  Not working yet.${RESET}"
+            echo -e "  ${DIM}  Make sure Python is in the list and toggled ON.${RESET}"
+            echo -e "  ${DIM}  Path: $PYTHON_REAL${RESET}"
+        fi
+
+        if [[ "$attempt" -ge 10 ]]; then
+            echo ""
+            echo -e "  ${YELLOW}  ⚠ Screen Recording could not be verified.${RESET}"
+            echo -e "  ${YELLOW}  Continuing — your partner will be alerted if protection is degraded.${RESET}"
         fi
     done
-else
-    echo -e "  ${GREEN}✓ Screen Recording: working${RESET}"
 fi
 
 # ── Launch setup UI ──────────────────────────────────────────────────────
+#
+# Pass PYTHON_REAL so setup.py stores it in config for guardian to use.
 
 echo ""
 echo -e "  ${YELLOW}Launching setup...${RESET}"
 echo ""
 
-$PYTHON "$YAL_DIR/setup.py"
+$PYTHON "$YAL_DIR/setup.py" --python-real "$PYTHON_REAL"
 
 echo ""
 echo -e "  ${GREEN}✓ Setup complete${RESET}"
@@ -398,7 +487,12 @@ pkill -f guardian.py 2>/dev/null || true
 pkill -f watchdog.py 2>/dev/null || true
 sleep 2
 
-# Guardian — user-level LaunchAgent (inherits user permissions for screen capture)
+# Guardian — user-level LaunchAgent (inherits user's TCC permissions).
+#
+# CRITICAL: ProgramArguments uses PYTHON_REAL — the fully resolved binary.
+# macOS grants Screen Recording to this exact path. Using the symlink
+# causes Guardian to silently receive wallpaper-only screenshots,
+# defeating all visual detection.
 mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$GUARDIAN_AGENT" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -410,7 +504,7 @@ cat > "$GUARDIAN_AGENT" << EOF
     <string>com.youareloved.guardian</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${PYTHON}</string>
+        <string>${PYTHON_REAL}</string>
         <string>-u</string>
         <string>${YAL_DIR}/guardian.py</string>
     </array>
@@ -439,7 +533,8 @@ chmod 444 "$GUARDIAN_AGENT"
 # Load guardian as user
 launchctl load -w "$GUARDIAN_AGENT" 2>/dev/null || true
 
-# Watchdog — system-level LaunchDaemon (root, monitors guardian, hard to remove)
+# Watchdog — system-level LaunchDaemon (root, monitors guardian)
+# Also uses PYTHON_REAL for consistency.
 sudo tee "$WATCHDOG_PLIST" > /dev/null << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -450,7 +545,7 @@ sudo tee "$WATCHDOG_PLIST" > /dev/null << EOF
     <string>com.youareloved.watchdog</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${PYTHON}</string>
+        <string>${PYTHON_REAL}</string>
         <string>-u</string>
         <string>${YAL_DIR}/watchdog.py</string>
     </array>
@@ -519,9 +614,20 @@ import sys, os, subprocess
 
 ok = True
 
-# 1. Screen capture
+# 1. Screen capture — content-aware check
+try:
+    import json
+    from pathlib import Path
+    cfg = json.loads((Path.home() / '.yal_config.json').read_text())
+    py_real = cfg.get('python_real_path', '')
+    if py_real:
+        print(f'  ✓ Resolved binary: {py_real}')
+except Exception:
+    pass
+
 try:
     import Quartz
+    from PIL import Image
     img = Quartz.CGWindowListCreateImage(
         Quartz.CGRectInfinite,
         Quartz.kCGWindowListOptionOnScreenOnly,
@@ -530,13 +636,20 @@ try:
     if img and Quartz.CGImageGetWidth(img) > 0:
         w = Quartz.CGImageGetWidth(img)
         h = Quartz.CGImageGetHeight(img)
-        provider = Quartz.CGImageGetDataProvider(img)
-        data = Quartz.CGDataProviderCopyData(provider)
-        sample = bytes(data[:800])
-        if any(b != 0 for b in sample):
-            print(f'  ✓ Screen capture: {w}x{h}')
+        bpr = Quartz.CGImageGetBytesPerRow(img)
+        data = bytes(Quartz.CGDataProviderCopyData(
+            Quartz.CGImageGetDataProvider(img)))
+        pil = Image.frombuffer('RGBA', (w, h), data, 'raw', 'BGRA', bpr, 1).convert('L')
+        pixels = list(pil.getdata())[::4]
+        mean = sum(pixels) / len(pixels)
+        std = (sum((p - mean) ** 2 for p in pixels) / len(pixels)) ** 0.5
+        if std > 45:
+            print(f'  ✓ Screen capture: {w}x{h} (std={std:.0f}, full desktop)')
+        elif std > 3:
+            print(f'  ⚠ Screen capture: {w}x{h} (std={std:.0f}, wallpaper-only — check permission)')
+            ok = False
         else:
-            print('  ✗ Screen capture: BLACK (no permission)')
+            print(f'  ✗ Screen capture: BLACK (no permission)')
             ok = False
     else:
         print('  ✗ Screen capture: failed')

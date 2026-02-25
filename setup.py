@@ -3,10 +3,15 @@
 You Are Loved — Setup UI
 
 Native macOS tkinter app. Pure black/white monochrome.
-4 screens: Welcome → Partner Setup → Installing → Complete.
+5 screens: Welcome → Partner Setup → Screen Access → Installing → Complete.
 
 Writes ~/.yal_config.json with multi-partner config.
 Sends uninstall code directly to partners (never shown to user).
+
+The Screen Access screen gates installation: the user cannot proceed
+until Screen Recording is verified to return full desktop content
+(not just wallpaper). This prevents the silent failure mode where
+Guardian runs but sees nothing.
 """
 
 import os
@@ -14,6 +19,7 @@ import sys
 import json
 import secrets
 import hashlib
+import subprocess
 import threading
 import urllib.request
 from pathlib import Path
@@ -30,6 +36,22 @@ except (ImportError, ModuleNotFoundError):
 CONFIG_FILE = Path.home() / ".yal_config.json"
 
 # ---------------------------------------------------------------------------
+# Parse --python-real from install.sh
+# ---------------------------------------------------------------------------
+
+def _parse_python_real() -> str:
+    """Extract --python-real value from argv, or resolve it ourselves."""
+    for i, arg in enumerate(sys.argv):
+        if arg == "--python-real" and i + 1 < len(sys.argv):
+            path = sys.argv[i + 1]
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
+    # Fallback: resolve our own executable
+    return os.path.realpath(sys.executable)
+
+PYTHON_REAL = _parse_python_real()
+
+# ---------------------------------------------------------------------------
 # Design tokens
 # ---------------------------------------------------------------------------
 
@@ -42,6 +64,7 @@ FONT_TITLE = ("SF Pro Display", 28, "bold")
 FONT_SUB = ("SF Pro Display", 13)
 FONT_SMALL = ("SF Pro Display", 11)
 FONT_BTN = ("SF Pro Display", 13, "bold")
+FONT_MONO = ("SF Mono", 11)
 WIN_W, WIN_H = 520, 680
 
 
@@ -109,6 +132,116 @@ def resolve_telegram_chats(token):
 
 
 # ---------------------------------------------------------------------------
+# Screen Recording verification
+# ---------------------------------------------------------------------------
+
+def verify_screen_recording(python_path: str = "") -> str:
+    """
+    Content-aware Screen Recording verification.
+
+    Uses the resolved Python binary to capture the screen, then measures
+    luminance standard deviation to distinguish:
+      - Full desktop (windows, text, UI chrome): std > 45 → "yes"
+      - Wallpaper-only (smooth gradient, no windows): std 3-45 → "wallpaper"
+      - Black / failed: std < 3 or error → "no"
+
+    Returns: "yes", "wallpaper", or "no"
+    """
+    py = python_path or PYTHON_REAL
+    try:
+        r = subprocess.run(
+            [py, "-c", """
+import sys
+try:
+    import Quartz
+    from PIL import Image
+    img = Quartz.CGWindowListCreateImage(
+        Quartz.CGRectInfinite,
+        Quartz.kCGWindowListOptionOnScreenOnly,
+        Quartz.kCGNullWindowID,
+        Quartz.kCGWindowImageDefault)
+    if not img or Quartz.CGImageGetWidth(img) == 0:
+        print('no'); sys.exit(0)
+    w = Quartz.CGImageGetWidth(img)
+    h = Quartz.CGImageGetHeight(img)
+    bpr = Quartz.CGImageGetBytesPerRow(img)
+    provider = Quartz.CGImageGetDataProvider(img)
+    data = bytes(Quartz.CGDataProviderCopyData(provider))
+    if all(b == 0 for b in data[:2000]):
+        print('no'); sys.exit(0)
+    pil = Image.frombuffer('RGBA', (w, h), data, 'raw', 'BGRA', bpr, 1).convert('L')
+    pixels = list(pil.getdata())[::4]
+    n = len(pixels)
+    mean = sum(pixels) / n
+    std = (sum((p - mean) ** 2 for p in pixels) / n) ** 0.5
+    if std > 45:
+        print('yes')
+    elif std > 3:
+        print('wallpaper')
+    else:
+        print('no')
+except Exception:
+    print('no')
+"""],
+            capture_output=True, text=True, timeout=15)
+        return r.stdout.strip() or "no"
+    except Exception:
+        return "no"
+
+
+def trigger_tcc_prepopulation(python_path: str = ""):
+    """
+    Attempt a screen capture with the resolved binary so macOS adds it
+    to the TCC Screen Recording list (toggled OFF). On macOS 14+, this
+    means the user may only need to toggle ON instead of manually adding.
+    """
+    py = python_path or PYTHON_REAL
+    try:
+        subprocess.run(
+            [py, "-c", """
+try:
+    import Quartz
+    Quartz.CGWindowListCreateImage(
+        Quartz.CGRectInfinite,
+        Quartz.kCGWindowListOptionOnScreenOnly,
+        Quartz.kCGNullWindowID,
+        Quartz.kCGWindowImageDefault)
+except: pass
+"""],
+            capture_output=True, timeout=10)
+    except Exception:
+        pass
+
+
+def open_screen_recording_settings():
+    """Open System Settings to the Screen Recording pane."""
+    try:
+        subprocess.run([
+            "open",
+            "x-apple.systempreferences:com.apple.preference.security"
+            "?Privacy_ScreenCapture"
+        ], capture_output=True, timeout=5)
+    except Exception:
+        pass
+    try:
+        subprocess.run([
+            "osascript", "-e",
+            'tell application "System Settings" to activate'
+        ], capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
+def copy_to_clipboard(text: str):
+    """Copy text to macOS clipboard."""
+    try:
+        p = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
+        p.communicate(text.encode())
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
 
@@ -131,6 +264,8 @@ class SetupApp:
         self.partner_frames = []
         self.partner_emails = []
         self.partner_telegrams = []
+        self.screen_verified = False
+        self._sr_check_after_id = None
 
         # API keys (pre-fill from existing config)
         existing = {}
@@ -150,15 +285,23 @@ class SetupApp:
         self.show_welcome()
 
     def clear(self):
+        # Cancel any pending after() callbacks
+        if self._sr_check_after_id:
+            self.root.after_cancel(self._sr_check_after_id)
+            self._sr_check_after_id = None
         for w in self.container.winfo_children():
             w.destroy()
 
-    def make_button(self, parent, text, command):
+    def make_button(self, parent, text, command, enabled=True):
+        state = "normal" if enabled else "disabled"
+        bg = FG if enabled else "#444444"
+        fg = BG if enabled else "#888888"
         btn = tk.Button(parent, text=text, command=command,
-                        bg=FG, fg=BG, font=FONT_BTN,
-                        relief="flat", cursor="hand2",
-                        padx=20, pady=10, bd=0,
-                        activebackground="#DDDDDD", activeforeground=BG)
+                        bg=bg, fg=fg, font=FONT_BTN,
+                        relief="flat", cursor="hand2" if enabled else "",
+                        padx=20, pady=10, bd=0, state=state,
+                        activebackground="#DDDDDD", activeforeground=BG,
+                        disabledforeground="#666666")
         return btn
 
     def make_entry(self, parent, textvariable=None, placeholder=""):
@@ -245,8 +388,8 @@ class SetupApp:
                  font=FONT_SMALL, fg=GREY, bg=BG,
                  justify="center").pack(pady=(12, 12))
 
-        btn = self.make_button(self.container, "Install Protection",
-                               self.start_install)
+        btn = self.make_button(self.container, "Continue",
+                               self._validate_and_continue)
         btn.pack(fill="x", ipady=4)
 
     def _dec_partners(self):
@@ -289,10 +432,8 @@ class SetupApp:
             t = self.make_entry(f, tg_var, "@username")
             t.pack(fill="x", ipady=5)
 
-    # --- Screen 3: Installing ---
-
-    def start_install(self):
-        # Validate
+    def _validate_and_continue(self):
+        """Validate partner fields, then show Screen Access gate."""
         partners = []
         for i in range(self.num_partners.get()):
             email = self.partner_emails[i].get().strip()
@@ -313,6 +454,226 @@ class SetupApp:
             return
 
         self.partners = partners
+        self.show_screen_access()
+
+    # --- Screen 3: Screen Access (verification gate) ---
+
+    def show_screen_access(self):
+        self.clear()
+        self.screen_verified = False
+
+        tk.Label(self.container, text="Screen Access",
+                 font=("SF Pro Display", 20, "bold"),
+                 fg=FG, bg=BG).pack(anchor="w", pady=(20, 12))
+
+        tk.Label(self.container,
+                 text="Protection needs permission to see your screen.\n"
+                      "This is what lets it detect and close harmful content.",
+                 font=FONT_SUB, fg=GREY, bg=BG, wraplength=440,
+                 justify="left").pack(anchor="w", pady=(0, 20))
+
+        # Status area
+        self.sr_status_frame = tk.Frame(self.container, bg=BG)
+        self.sr_status_frame.pack(fill="x", pady=(0, 16))
+
+        self.sr_status_icon = tk.Label(self.sr_status_frame,
+                                        text="○", font=("SF Pro Display", 16),
+                                        fg=GREY, bg=BG)
+        self.sr_status_icon.pack(side="left", padx=(0, 10))
+        self.sr_status_text = tk.Label(self.sr_status_frame,
+                                        text="Checking...",
+                                        font=FONT, fg=GREY, bg=BG)
+        self.sr_status_text.pack(side="left")
+
+        # Instructions (hidden initially, shown if verification fails)
+        self.sr_instructions = tk.Frame(self.container, bg=BG)
+        self.sr_instructions.pack(fill="x", pady=(0, 10))
+
+        # Path display
+        self.sr_path_frame = tk.Frame(self.container, bg=DARK_GREY,
+                                       highlightthickness=1,
+                                       highlightbackground="#333333")
+        self.sr_path_frame.pack(fill="x", pady=(0, 16))
+        self.sr_path_label = tk.Label(self.sr_path_frame,
+                                       text=PYTHON_REAL,
+                                       font=FONT_MONO, fg=GREY, bg=DARK_GREY,
+                                       wraplength=420, justify="left")
+        self.sr_path_label.pack(padx=12, pady=8, anchor="w")
+
+        # Copy button
+        self.sr_copy_btn = tk.Button(
+            self.container, text="Copy Path to Clipboard",
+            command=lambda: self._copy_path(),
+            bg=DARK_GREY, fg=FG, font=FONT_SMALL,
+            relief="flat", bd=0, cursor="hand2",
+            activebackground="#333333")
+        self.sr_copy_btn.pack(anchor="w", pady=(0, 16))
+
+        # Continue button (disabled until verified)
+        self.sr_continue_btn = self.make_button(
+            self.container, "Continue", self.start_install, enabled=False)
+        self.sr_continue_btn.pack(fill="x", ipady=4, side="bottom")
+
+        # Skip link (after several failed attempts)
+        self.sr_skip_frame = tk.Frame(self.container, bg=BG)
+        self.sr_skip_frame.pack(fill="x", side="bottom", pady=(8, 0))
+
+        self.sr_attempt_count = 0
+
+        # Hide instructions and path initially
+        self.sr_instructions.pack_forget()
+        self.sr_path_frame.pack_forget()
+        self.sr_copy_btn.pack_forget()
+
+        # Trigger TCC pre-population and start checking
+        threading.Thread(target=self._sr_initial_check, daemon=True).start()
+
+    def _sr_initial_check(self):
+        """Trigger TCC, wait, then verify."""
+        trigger_tcc_prepopulation()
+        import time
+        time.sleep(1)
+        result = verify_screen_recording()
+        self.root.after(0, lambda: self._sr_handle_result(result))
+
+    def _sr_handle_result(self, result: str):
+        """Update UI based on verification result."""
+        if result == "yes":
+            self.screen_verified = True
+            self.sr_status_icon.configure(text="✓", fg="#44CC44")
+            self.sr_status_text.configure(
+                text="Screen Recording is enabled.", fg=FG)
+            # Hide instructions if shown
+            self.sr_instructions.pack_forget()
+            self.sr_path_frame.pack_forget()
+            self.sr_copy_btn.pack_forget()
+            self.sr_skip_frame.pack_forget()
+            # Enable continue
+            self.sr_continue_btn.configure(
+                state="normal", bg=FG, fg=BG, cursor="hand2")
+        elif result == "wallpaper":
+            self.sr_attempt_count += 1
+            self.sr_status_icon.configure(text="◐", fg=YELLOW)
+            self.sr_status_text.configure(
+                text="Seeing wallpaper only — wrong binary may be enabled.",
+                fg=YELLOW)
+            self._sr_show_instructions(wallpaper=True)
+        else:
+            self.sr_attempt_count += 1
+            self.sr_status_icon.configure(text="○", fg="#FF6666")
+            self.sr_status_text.configure(
+                text="Screen Recording not enabled yet.", fg="#FF6666")
+            self._sr_show_instructions(wallpaper=False)
+            # Open Settings automatically on first failure
+            if self.sr_attempt_count == 1:
+                open_screen_recording_settings()
+
+    def _sr_show_instructions(self, wallpaper: bool = False):
+        """Show step-by-step instructions."""
+        # Clear previous instructions
+        for w in self.sr_instructions.winfo_children():
+            w.destroy()
+
+        if wallpaper:
+            tk.Label(self.sr_instructions,
+                     text="The permission may be granted to a different\n"
+                          "Python binary. Make sure this exact path is enabled:",
+                     font=FONT_SMALL, fg=GREY, bg=BG, wraplength=440,
+                     justify="left").pack(anchor="w", pady=(0, 4))
+        else:
+            tk.Label(self.sr_instructions,
+                     text="In System Settings → Screen Recording:\n"
+                          "Look for Python and toggle it ON.\n\n"
+                          "If Python isn't listed, click + at the bottom,\n"
+                          "press Cmd+Shift+G, paste the path below, click Open.",
+                     font=FONT_SMALL, fg=GREY, bg=BG, wraplength=440,
+                     justify="left").pack(anchor="w", pady=(0, 4))
+
+        # Show all the hidden elements
+        self.sr_instructions.pack(fill="x", pady=(0, 10),
+                                   before=self.sr_continue_btn)
+        self.sr_path_frame.pack(fill="x", pady=(0, 16),
+                                 before=self.sr_continue_btn)
+        self.sr_copy_btn.pack(anchor="w", pady=(0, 16),
+                               before=self.sr_continue_btn)
+
+        # Open Settings button
+        open_btn = tk.Button(
+            self.sr_instructions,
+            text="Open Screen Recording Settings",
+            command=open_screen_recording_settings,
+            bg=DARK_GREY, fg=FG, font=FONT_SMALL,
+            relief="flat", bd=0, cursor="hand2",
+            activebackground="#333333")
+        open_btn.pack(anchor="w", pady=(8, 0))
+
+        # "I've enabled it" check button
+        check_btn = tk.Button(
+            self.sr_instructions,
+            text="I've enabled it — check again",
+            command=self._sr_recheck,
+            bg=DARK_GREY, fg=FG, font=FONT_SMALL,
+            relief="flat", bd=0, cursor="hand2",
+            activebackground="#333333")
+        check_btn.pack(anchor="w", pady=(8, 0))
+
+        # After 3+ failed attempts, show skip option
+        if self.sr_attempt_count >= 3:
+            for w in self.sr_skip_frame.winfo_children():
+                w.destroy()
+            tk.Button(self.sr_skip_frame,
+                      text="Skip for now — I'll fix this later",
+                      command=self._sr_skip,
+                      bg=BG, fg="#666666", font=FONT_SMALL,
+                      relief="flat", bd=0, cursor="hand2",
+                      activebackground=BG).pack(anchor="center")
+            self.sr_skip_frame.pack(fill="x", side="bottom", pady=(8, 0))
+
+        # Also auto-poll every 3 seconds (in case user enables without clicking)
+        self._sr_schedule_autopoll()
+
+    def _sr_schedule_autopoll(self):
+        """Auto-check every 3 seconds in background."""
+        if self.screen_verified:
+            return
+
+        def _poll():
+            result = verify_screen_recording()
+            if result == "yes":
+                self.root.after(0, lambda: self._sr_handle_result("yes"))
+            else:
+                # Schedule next poll
+                self._sr_check_after_id = self.root.after(
+                    3000, self._sr_schedule_autopoll)
+
+        threading.Thread(target=_poll, daemon=True).start()
+
+    def _sr_recheck(self):
+        """Manual re-check button."""
+        self.sr_status_icon.configure(text="○", fg=GREY)
+        self.sr_status_text.configure(text="Checking...", fg=GREY)
+
+        def _check():
+            result = verify_screen_recording()
+            self.root.after(0, lambda: self._sr_handle_result(result))
+
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _sr_skip(self):
+        """Allow skipping after multiple failed attempts — with warning."""
+        self.screen_verified = False  # Will be noted in config
+        self.start_install()
+
+    def _copy_path(self):
+        """Copy resolved Python path to clipboard and show feedback."""
+        copy_to_clipboard(PYTHON_REAL)
+        self.sr_copy_btn.configure(text="Copied ✓")
+        self.root.after(2000, lambda: self.sr_copy_btn.configure(
+            text="Copy Path to Clipboard"))
+
+    # --- Screen 4: Installing ---
+
+    def start_install(self):
         self.show_installing()
 
     def show_installing(self):
@@ -379,6 +740,8 @@ class SetupApp:
                 "installed_at": datetime.now().isoformat(),
                 "guardian_path": str(
                     Path.home() / "youareloved" / "guardian.py"),
+                "python_real_path": PYTHON_REAL,
+                "screen_recording_verified": self.screen_verified,
                 "sendgrid_api_key": sg_key,
                 "telegram_bot_token": tg_token,
                 "anthropic_api_key": anthropic_key,
@@ -419,76 +782,40 @@ class SetupApp:
                 if tg_token and tg_chat:
                     send_telegram(tg_token, tg_chat, welcome)
 
-            self._update_status("Activating protection...", 80)
+            self._update_status("Activating protection...", 85)
             import time
             time.sleep(1)
 
-            # Verify screen capture works — critical for image detection.
-            # screencapture is tried first; if it fails, open System Settings
-            # so the user can grant Screen Recording permission now.
-            self._update_status("Verifying screen access...", 90)
-            _tmpf = "/tmp/yal_perm_test.png"
-            try:
-                import subprocess as _sp, os as _os
-                _r = _sp.run(
-                    ["/usr/sbin/screencapture", "-x", _tmpf],
-                    capture_output=True, timeout=10)
-                _ok = (
-                    _r.returncode == 0
-                    and _os.path.exists(_tmpf)
-                    and _os.path.getsize(_tmpf) > 10000
-                )
-            except Exception:
-                _ok = False
-            finally:
-                try:
-                    import os as _os2
-                    if _os2.path.exists(_tmpf):
-                        _os2.unlink(_tmpf)
-                except Exception:
-                    pass
-
-            if not _ok:
-                # Open Screen Recording settings and prompt user to grant access
-                try:
-                    import subprocess as _sp2
-                    _sp2.run([
-                        "open",
-                        "x-apple.systempreferences:com.apple.preference.security"
-                        "?Privacy_ScreenCapture"
-                    ], timeout=5)
-                except Exception:
-                    pass
-                self._update_status(
-                    "Grant Screen Recording in System Settings, then continue.", 90)
-                import time as _t
-                _t.sleep(6)   # give the user time to grant and return
-
             self._update_status("Complete.", 100)
-            import time
             time.sleep(0.5)
             self.root.after(0, self.show_complete)
 
         except Exception as e:
             self._update_status(f"Error: {e}", 0)
 
-    # --- Screen 4: Complete ---
+    # --- Screen 5: Complete ---
 
     def show_complete(self):
         self.clear()
 
-        spacer = tk.Frame(self.container, bg=BG, height=140)
+        spacer = tk.Frame(self.container, bg=BG, height=120)
         spacer.pack()
 
         tk.Label(self.container, text="You are loved.",
                  font=FONT_TITLE, fg=FG, bg=BG).pack(pady=(0, 20))
 
+        status_lines = "Protection is active.\nYour partner(s) have been notified.\nThe uninstall code has been sent to them."
+        if not self.screen_verified:
+            status_lines += (
+                "\n\nScreen Recording was not verified.\n"
+                "Guardian will alert your partner if screen\n"
+                "access is missing when it starts."
+            )
+
         tk.Label(self.container,
-                 text="Protection is active.\n"
-                      "Your partner(s) have been notified.\n"
-                      "The uninstall code has been sent to them.",
+                 text=status_lines,
                  font=FONT_SUB, fg=GREY, bg=BG,
-                 justify="center").pack(pady=(0, 60))
+                 justify="center").pack(pady=(0, 50))
 
         btn = self.make_button(self.container, "Done",
                                self.root.destroy)
@@ -497,6 +824,10 @@ class SetupApp:
     def run(self):
         self.root.mainloop()
 
+
+# ---------------------------------------------------------------------------
+# Terminal fallback
+# ---------------------------------------------------------------------------
 
 def terminal_fallback():
     """Minimal terminal-based setup when tkinter/display is unavailable."""
@@ -542,6 +873,46 @@ def terminal_fallback():
                 p["telegram_chat_id"] = chats[tg]
                 print(f"  ✓ Resolved {p['telegram']} → {chats[tg]}")
 
+    # Screen Recording verification (terminal version)
+    print("\n  Verifying screen access...")
+    trigger_tcc_prepopulation()
+    import time
+    time.sleep(1)
+    sr_result = verify_screen_recording()
+    sr_verified = sr_result == "yes"
+
+    if sr_verified:
+        print("  ✓ Screen Recording: working")
+    else:
+        copy_to_clipboard(PYTHON_REAL)
+        print("")
+        print(f"  Screen Recording needs to be enabled for:")
+        print(f"  {PYTHON_REAL}")
+        print(f"  (Path copied to clipboard)")
+        print("")
+        print(f"  Open System Settings → Screen Recording.")
+        print(f"  Toggle Python ON, or click + and paste the path above.")
+        open_screen_recording_settings()
+
+        for attempt in range(1, 11):
+            input(f"\n  Press Enter after enabling it...")
+            sr_result = verify_screen_recording()
+            if sr_result == "yes":
+                sr_verified = True
+                print("  ✓ Screen Recording: working")
+                break
+            elif sr_result == "wallpaper":
+                print(f"  Almost — seeing wallpaper only. Make sure this exact path is enabled:")
+                print(f"  {PYTHON_REAL}")
+                copy_to_clipboard(PYTHON_REAL)
+            else:
+                print(f"  Not working yet. Make sure Python is toggled ON.")
+
+            if attempt >= 5:
+                skip = input("  Skip for now? (y/N): ").strip().lower()
+                if skip == "y":
+                    break
+
     # Generate code
     code = f"{secrets.randbelow(1000000):06d}"
 
@@ -551,6 +922,8 @@ def terminal_fallback():
         "code_hash": hash_code(code),
         "installed_at": datetime.now().isoformat(),
         "guardian_path": str(Path.home() / "youareloved" / "guardian.py"),
+        "python_real_path": PYTHON_REAL,
+        "screen_recording_verified": sr_verified,
         "sendgrid_api_key": sg_key,
         "telegram_bot_token": tg_token,
         "anthropic_api_key": anthropic_key,
@@ -597,10 +970,28 @@ def terminal_fallback():
     if sent:
         print(f"  The uninstall code has been sent to your partner(s).")
         print(f"  You will not see it.")
+    if not sr_verified:
+        print(f"\n  ⚠ Screen Recording was not verified.")
+        print(f"  Guardian will run but may not detect visual content")
+        print(f"  until Screen Recording is enabled for:")
+        print(f"  {PYTHON_REAL}")
     input("\n  Press Enter to continue...")
 
 
 if __name__ == "__main__":
+    # Filter out --python-real from argv before tkinter sees it
+    filtered_argv = []
+    skip_next = False
+    for arg in sys.argv[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--python-real":
+            skip_next = True
+            continue
+        filtered_argv.append(arg)
+    sys.argv = [sys.argv[0]] + filtered_argv
+
     if not HAS_TK:
         print("  (tkinter not available — using terminal setup)")
         terminal_fallback()
