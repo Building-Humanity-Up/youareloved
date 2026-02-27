@@ -979,6 +979,74 @@ def terminal_fallback():
 
 
 if __name__ == "__main__":
+    # CLI utility: resolve Telegram chat_ids after initial setup.
+    # Usage:
+    #   python3 ~/youareloved/setup.py --resolve-telegram [--telegram-token TOKEN] [--wait]
+    if "--resolve-telegram" in sys.argv[1:]:
+        token_override = ""
+        wait = "--wait" in sys.argv[1:]
+        if "--telegram-token" in sys.argv[1:]:
+            try:
+                token_override = sys.argv[sys.argv.index("--telegram-token") + 1]
+            except Exception:
+                token_override = ""
+
+        cfg = {}
+        if CONFIG_FILE.exists():
+            try:
+                cfg = json.loads(CONFIG_FILE.read_text())
+            except Exception:
+                cfg = {}
+
+        token = (token_override or cfg.get("telegram_bot_token", "") or "").strip()
+        partners = cfg.get("partners", []) or []
+
+        print("\n=== Telegram Chat ID Resolution (setup.py) ===")
+        if not token:
+            print("Telegram bot token: not set")
+            sys.exit(2)
+
+        if wait and sys.stdin.isatty():
+            print("Partners must send /start to the bot first.")
+            input("Press Enter to fetch updates now...")
+
+        chats = resolve_telegram_chats(token)
+        changed = False
+        resolved = 0
+        unresolved = 0
+        skipped = 0
+
+        for p in partners:
+            tg_raw = (p.get("telegram", "") or "").strip()
+            tg_u = tg_raw.lower().lstrip("@").strip()
+            if (p.get("telegram_chat_id", "") or "").strip():
+                skipped += 1
+                continue
+            if not tg_u:
+                skipped += 1
+                continue
+            cid = chats.get(tg_u, "")
+            if cid:
+                p["telegram_chat_id"] = cid
+                resolved += 1
+                changed = True
+                print(f"  ✓ {tg_raw or '@'+tg_u} → {cid}")
+            else:
+                unresolved += 1
+                print(f"  ⚠ {tg_raw or '@'+tg_u} (not found in updates)")
+
+        if changed:
+            cfg["partners"] = partners
+            if token_override and token_override.strip() and token_override.strip() != cfg.get("telegram_bot_token", ""):
+                cfg["telegram_bot_token"] = token_override.strip()
+            CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+            print("Config updated: yes")
+        else:
+            print("Config updated: no")
+
+        print(f"Resolved: {resolved} | Unresolved: {unresolved} | Skipped: {skipped}")
+        sys.exit(0)
+
     # Filter out --python-real from argv before tkinter sees it
     filtered_argv = []
     skip_next = False

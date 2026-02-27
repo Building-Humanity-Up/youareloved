@@ -57,10 +57,10 @@ except ImportError:
 
 DIALOG_COOLDOWN = 30
 LOCK_COOLDOWN = 600  # 10 min before next lock
-TRIGGER_THRESHOLD = 0.10
+TRIGGER_THRESHOLD = 0.3
 COARSE_GRID = 5
 FINE_GRID = 3
-DETECTION_ANY = 0.10
+DETECTION_ANY = 0.1
 
 SCAN_ACTIVE = 5
 SCAN_IDLE = 30
@@ -358,6 +358,100 @@ def get_telegram_token() -> str:
     cfg = load_config()
     return cfg.get("telegram_bot_token", "")
 
+def _fetch_telegram_chats_from_updates(tg_token: str, timeout_s: int = 10) -> dict:
+    """Return mapping of normalized telegram usernames -> chat_id from bot getUpdates.
+
+    Note: Telegram bots can only discover a user's chat_id after the user has interacted
+    with the bot (e.g. /start). getUpdates is the simplest polling mechanism.
+    """
+    if not tg_token:
+        return {}
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{tg_token}/getUpdates")
+    resp = urllib.request.urlopen(req, timeout=timeout_s)
+    updates = json.loads(resp.read().decode())
+    chats = {}
+    for update in updates.get("result", []):
+        msg = update.get("message", {}) or {}
+        chat = msg.get("chat", {}) or {}
+        username = (chat.get("username", "") or "").strip()
+        chat_id = str(chat.get("id", "") or "").strip()
+        if not username or not chat_id:
+            continue
+        u = username.lower().lstrip("@").strip()
+        chats[u] = chat_id
+        chats[f"@{u}"] = chat_id
+    return chats
+
+def resolve_telegram_chat_ids(
+    *,
+    tg_token=None,
+    wait_for_enter: bool = False,
+    save: bool = True,
+):
+    """Resolve missing partner.telegram_chat_id values and persist into config.
+
+    - Matches by partner["telegram"] username (with/without @), case-insensitive.
+    - Safe to run repeatedly; only fills missing chat_ids.
+    - Does not require setup wizard; intended as a self-healing operational command.
+
+    Returns a report dict (resolved/unresolved/skipped counts + details).
+    """
+    cfg = load_config()
+    partners = cfg.get("partners", []) or []
+    token = (tg_token or cfg.get("telegram_bot_token", "") or "").strip()
+
+    report = {
+        "token_present": bool(token),
+        "partners_total": len(partners),
+        "resolved": [],
+        "unresolved": [],
+        "skipped": [],
+        "changed": False,
+    }
+
+    if not token:
+        return report
+
+    if wait_for_enter and sys.stdin.isatty():
+        print("\nResolving Telegram chat IDs...")
+        print("Partners must send /start to the bot first.")
+        input("Press Enter to fetch updates now...")
+
+    try:
+        chats = _fetch_telegram_chats_from_updates(token)
+    except Exception as e:
+        report["error"] = str(e)
+        return report
+
+    for p in partners:
+        tg_raw = (p.get("telegram", "") or "").strip()
+        tg_u = tg_raw.lower().lstrip("@").strip()
+        existing = (p.get("telegram_chat_id", "") or "").strip()
+
+        if existing:
+            report["skipped"].append({"telegram": tg_raw, "chat_id": existing, "reason": "already_set"})
+            continue
+        if not tg_u:
+            report["skipped"].append({"telegram": tg_raw, "chat_id": "", "reason": "no_username"})
+            continue
+
+        cid = chats.get(tg_u, "") or chats.get(f"@{tg_u}", "")
+        if cid:
+            p["telegram_chat_id"] = cid
+            report["resolved"].append({"telegram": tg_raw or f"@{tg_u}", "chat_id": cid})
+            report["changed"] = True
+        else:
+            report["unresolved"].append({"telegram": tg_raw or f"@{tg_u}", "reason": "not_in_updates"})
+
+    if report["changed"] and save:
+        cfg["partners"] = partners
+        if tg_token and str(tg_token).strip() and str(tg_token).strip() != cfg.get("telegram_bot_token", ""):
+            cfg["telegram_bot_token"] = str(tg_token).strip()
+        save_config(cfg)
+
+    return report
+
 def hash_code(code: str) -> str:
     return hashlib.sha256(code.encode()).hexdigest()
 
@@ -415,18 +509,43 @@ def _send_email_alert(api_key: str, to_email: str, subject: str, body: str):
     try:
         data = json.dumps({
             "personalizations": [{"to": [{"email": to_email}]}],
-            "from": {"email": "alerts@youareloved.app",
-                     "name": "You Are Loved"},
+            "from": {"email": "alerts@finallyfreeai.com", "name": "You Are Loved"},
+            "reply_to": {"email": "alerts@finallyfreeai.com", "name": "You Are Loved"},
             "subject": subject,
-            "content": [{"type": "text/plain", "value": body}]
-        }).encode()
+            "content": [{"type": "text/plain", "value": body}],
+        }).encode("utf-8")
+
         req = urllib.request.Request(
-            "https://api.sendgrid.com/v3/mail/send", data=data,
-            headers={"Authorization": f"Bearer {api_key}",
-                     "Content-Type": "application/json"}, method="POST")
-        urllib.request.urlopen(req, timeout=10)
+            "https://api.sendgrid.com/v3/mail/send",
+            data=data,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            msg_id = resp.headers.get("X-Message-Id", "")
+            log.info(
+                f"  ALERT: Email accepted (HTTP {resp.status}) to {to_email} | msg_id={msg_id}"
+            )
+
     except Exception as e:
         log.error(f"  Email send failed ({to_email}): {e}")
+
+
+def _send_tamper_alert(api_key: str, to_email: str, detail: str):
+    """Send a tamper attempt alert email (routes through _send_email_alert)."""
+    _send_email_alert(
+        api_key,
+        to_email,
+        "⚠️ You Are Loved — Tamper Attempt",
+        (
+            f"Tamper detected.\nDetail: {detail}\n"
+            f"Time: {datetime.now().isoformat()}\n\n— You Are Loved"
+        ),
+    )
 
 def _create_blurred_screenshot(full_img) -> str:
     """Create Gaussian-blurred screenshot, return path. Never sends unblurred."""
@@ -730,21 +849,17 @@ def check_tamper():
             _recreate_plist()
 
 def _send_tamper_alert(api_key: str, to_email: str, detail: str):
-    data = json.dumps({
-        "personalizations": [{"to": [{"email": to_email}]}],
-        "from": {"email": "guardian@youareloved.app", "name": "You Are Loved"},
-        "subject": "⚠️ You Are Loved — Tamper Attempt",
-        "content": [{"type": "text/plain", "value": (
+    """Send a tamper attempt alert email (routes through _send_email_alert)."""
+    _send_email_alert(
+        api_key,
+        to_email,
+        "⚠️ You Are Loved — Tamper Attempt",
+        (
             f"Tamper detected.\nDetail: {detail}\n"
             f"Time: {datetime.now().isoformat()}\n\n— You Are Loved"
-        )}]
-    }).encode()
-    req = urllib.request.Request(
-        "https://api.sendgrid.com/v3/mail/send", data=data,
-        headers={"Authorization": f"Bearer {api_key}",
-                 "Content-Type": "application/json"}, method="POST")
-    urllib.request.urlopen(req, timeout=10)
-
+        ),
+    )
+    
 def _recreate_plist():
     try:
         plist = f'''<?xml version="1.0" encoding="UTF-8"?>
@@ -2079,6 +2194,12 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--image-only", action="store_true", default=False,
                         help="Run only the NudeNet image detection loop (no response/actions)")
+    parser.add_argument("--resolve-telegram", action="store_true", default=False,
+                        help="Resolve partner Telegram chat_ids from bot getUpdates and persist to config")
+    parser.add_argument("--telegram-token", default="",
+                        help="Override Telegram bot token (also persists into config if resolution succeeds)")
+    parser.add_argument("--wait", action="store_true", default=False,
+                        help="Wait for Enter before fetching getUpdates (useful while partners are /starting)")
     return parser.parse_args()
 
 def _image_only_relevant(results: list) -> list:
@@ -2247,6 +2368,39 @@ def main():
 
 if __name__ == "__main__":
     args = parse_args()
+    if getattr(args, "resolve_telegram", False):
+        report = resolve_telegram_chat_ids(
+            tg_token=(args.telegram_token or None),
+            wait_for_enter=bool(getattr(args, "wait", False)),
+            save=True,
+        )
+        print("\n=== Telegram Chat ID Resolution Report ===")
+        if not report.get("token_present"):
+            print("Telegram bot token: not set")
+            sys.exit(2)
+        if report.get("error"):
+            print(f"Error: {report['error']}")
+            sys.exit(2)
+        print(f"Partners: {report.get('partners_total', 0)}")
+        print(f"Resolved: {len(report.get('resolved', []))}")
+        for r in report.get("resolved", []):
+            print(f"  ✓ {r.get('telegram')} → {r.get('chat_id')}")
+        print(f"Unresolved: {len(report.get('unresolved', []))}")
+        for u in report.get("unresolved", []):
+            print(f"  ⚠ {u.get('telegram')} (not found in updates)")
+        print(f"Skipped: {len(report.get('skipped', []))}")
+        for s in report.get("skipped", []):
+            reason = s.get("reason", "")
+            tg = s.get("telegram") or "(none)"
+            if reason == "already_set":
+                print(f"  ↷ {tg} (already has chat_id)")
+            elif reason == "no_username":
+                print(f"  ↷ {tg} (no telegram username on partner)")
+        if report.get("changed"):
+            print("Config updated: yes")
+        else:
+            print("Config updated: no")
+        sys.exit(0)
     if args.image_only:
         run_image_only_main()
     else:
