@@ -20,3 +20,5 @@ ios/
 
 # local AI worktrees
 .claude/
+devices.db
+*.db
