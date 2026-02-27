@@ -15,7 +15,6 @@ install_daemon.sh
 .yal_memory.json
 .yal_last_update_check
 yal.sh
-ios/
 *.backup
 
 # local AI worktrees
