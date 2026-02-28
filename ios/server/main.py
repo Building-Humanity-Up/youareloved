@@ -308,32 +308,32 @@ def install():
                 min-width: 28px; height: 28px; display: flex; align-items: center;
                 justify-content: center; font-size: 0.8rem; font-weight: 700; }}
         .step-text {{ font-size: 0.9rem; color: #1c1c1e; line-height: 1.5; padding-top: 3px; }}
-        .deeplink {{ display: block; background: #1c1c1e; color: white; padding: 16px;
-                     border-radius: 14px; text-decoration: none; font-weight: 600;
-                     font-size: 1rem; margin: 24px 0 10px; }}
+        .btn {{ display: block; background: #1c1c1e; color: white; padding: 16px;
+                border-radius: 14px; text-decoration: none; font-weight: 600;
+                font-size: 1rem; margin: 24px 0 10px; }}
         .footer {{ font-size: 0.78rem; color: #aeaeb2; margin-top: 20px; }}
     </style>
     <script>
         window.onload = function() {{
             setTimeout(function() {{
-                window.location.href = '/ios/profile/{link_token}';
-            }}, 600);
+                window.location.href = 'https://api.finallyfreeai.com/ios/profile/{link_token}';
+            }}, 800);
         }};
     </script>
 </head>
 <body>
     <h1>Hi {firstname} 👋</h1>
-    <p class="sub">Your protection profile is downloading.<br>Follow these steps carefully.</p>
+    <p class="sub">Your protection profile is downloading now.<br>Follow these steps to install it.</p>
     <div class="step"><div class="num">1</div>
-        <div class="step-text">Tap <b>Allow</b> when asked to download a configuration profile</div></div>
+        <div class="step-text">Tap <b>Allow</b> when Safari asks to download a configuration profile</div></div>
     <div class="step"><div class="num">2</div>
         <div class="step-text">Tap <b>Close</b> on the "Profile Downloaded" banner</div></div>
     <div class="step"><div class="num">3</div>
-        <div class="step-text">Tap the button below to open Settings directly</div></div>
+        <div class="step-text">Open <b>Settings → General → VPN &amp; Device Management</b></div></div>
     <div class="step"><div class="num">4</div>
         <div class="step-text">Tap <b>You Are Loved Protection</b> → <b>Install</b> → enter your passcode</div></div>
-    <a href="App-prefs:root=General&path=ManagedConfigurationList" class="deeplink">
-        Open Settings → Install Profile ↗
+    <a href="https://api.finallyfreeai.com/ios/profile/{link_token}" class="btn">
+        Download Profile →
     </a>
     <p class="footer">You Are Loved · Building Humanity Up</p>
 </body>
