@@ -13,14 +13,6 @@ interface Partner {
   email?: string;
 }
 
-const installSteps = [
-  "Open your iPhone camera and scan the QR code",
-  "Tap the notification to open the profile download",
-  "Go to Settings \u2192 General \u2192 VPN & Device Management",
-  "Tap the downloaded profile and press Install",
-  "Protection is now active \u2014 your partners will be notified if it\u2019s removed",
-];
-
 function CheckIcon({ className }: { className?: string }) {
   return (
     <svg
@@ -50,6 +42,15 @@ function DownloadContent() {
   const [partners, setPartners] = useState<Partner[]>([]);
   const [partnersChecked, setPartnersChecked] = useState(false);
   const [checkingPartners, setCheckingPartners] = useState(false);
+  const [partnerFetchFailed, setPartnerFetchFailed] = useState(false);
+
+  // Inline partner add (shown when no partners exist or fetch failed)
+  const [inlinePartner, setInlinePartner] = useState({
+    name: "",
+    telegram: "",
+  });
+  const [addingPartner, setAddingPartner] = useState(false);
+  const [partnerAddError, setPartnerAddError] = useState<string | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
@@ -58,17 +59,30 @@ function DownloadContent() {
   const fetchPartners = useCallback(async (userEmail: string) => {
     if (!userEmail) return;
     setCheckingPartners(true);
+    setPartnerFetchFailed(false);
+    console.log("[YAL] Fetching partners for:", userEmail);
+
     try {
-      const res = await fetch(
-        `https://api.finallyfreeai.com/account/partners?email=${encodeURIComponent(userEmail)}`,
-      );
+      const url = `https://api.finallyfreeai.com/account/partners?email=${encodeURIComponent(userEmail)}`;
+      console.log("[YAL] GET", url);
+      const res = await fetch(url);
+      console.log("[YAL] Partners response status:", res.status, res.statusText);
+
       if (res.ok) {
         const data = await res.json();
-        setPartners(data.partners || []);
+        console.log("[YAL] Partners response body:", JSON.stringify(data));
+        const list = data.partners || data.data?.partners || [];
+        console.log("[YAL] Parsed partners list:", JSON.stringify(list));
+        setPartners(list);
       } else {
+        const text = await res.text().catch(() => "(unreadable)");
+        console.warn("[YAL] Partners non-OK response:", res.status, text);
+        setPartnerFetchFailed(true);
         setPartners([]);
       }
-    } catch {
+    } catch (err) {
+      console.error("[YAL] Partners fetch failed (likely CORS):", err);
+      setPartnerFetchFailed(true);
       setPartners([]);
     } finally {
       setPartnersChecked(true);
@@ -88,12 +102,50 @@ function DownloadContent() {
     if (email) fetchPartners(email);
   };
 
+  const handleAddInlinePartner = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAddingPartner(true);
+    setPartnerAddError(null);
+
+    try {
+      console.log("[YAL] Adding partner:", inlinePartner);
+      const res = await fetch(
+        "https://api.finallyfreeai.com/account/partners",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            user_email: email,
+            partner_name: inlinePartner.name,
+            partner_telegram: inlinePartner.telegram,
+          }),
+        },
+      );
+      console.log("[YAL] Add partner response:", res.status);
+
+      if (!res.ok) throw new Error("Failed to add partner");
+
+      setPartners((prev) => [
+        ...prev,
+        { name: inlinePartner.name, telegram: inlinePartner.telegram },
+      ]);
+      setInlinePartner({ name: "", telegram: "" });
+      setPartnerFetchFailed(false);
+    } catch (err) {
+      console.error("[YAL] Add partner error:", err);
+      setPartnerAddError("Could not add partner. Please try again.");
+    } finally {
+      setAddingPartner(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
 
     try {
+      console.log("[YAL] Enrolling:", { firstname: firstName, user_email: email });
       const res = await fetch("https://api.finallyfreeai.com/ios/enroll", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -103,19 +155,23 @@ function DownloadContent() {
         }),
       });
 
+      console.log("[YAL] Enroll response:", res.status);
       if (!res.ok) throw new Error("Enrollment failed");
 
       const data = await res.json();
+      console.log("[YAL] Enroll data:", JSON.stringify(data));
       setDownloadUrl(data.download_url);
-    } catch {
+    } catch (err) {
+      console.error("[YAL] Enroll error:", err);
       setError("Something went wrong. Please try again.");
     } finally {
       setLoading(false);
     }
   };
 
-  const hasPartners = partnersChecked && partners.length > 0;
-  const noPartners = partnersChecked && partners.length === 0;
+  const hasPartners = partners.length > 0;
+  const showPartnerEntry =
+    partnersChecked && !hasPartners;
 
   return (
     <>
@@ -165,6 +221,7 @@ function DownloadContent() {
                       onChange={(e) => {
                         setEmail(e.target.value);
                         setPartnersChecked(false);
+                        setPartnerFetchFailed(false);
                       }}
                       onBlur={handleEmailBlur}
                       className="input"
@@ -172,13 +229,14 @@ function DownloadContent() {
                     />
                   </div>
 
-                  {/* Partners status */}
+                  {/* Checking spinner */}
                   {checkingPartners && (
                     <p className="text-sm text-muted-light">
                       Checking partners&hellip;
                     </p>
                   )}
 
+                  {/* Green panel — partners found */}
                   {hasPartners && (
                     <div className="rounded-2xl bg-emerald-50/60 border border-emerald-200/50 p-5 space-y-3">
                       <p className="text-sm font-medium text-emerald-800">
@@ -191,25 +249,87 @@ function DownloadContent() {
                         >
                           <CheckIcon className="w-4 h-4 shrink-0" />
                           <span>{p.name}</span>
-                          <span className="text-emerald-500 text-xs">
-                            {p.telegram}
-                          </span>
+                          {p.telegram && (
+                            <span className="text-emerald-500 text-xs">
+                              {p.telegram}
+                            </span>
+                          )}
                         </div>
                       ))}
                     </div>
                   )}
 
-                  {noPartners && (
-                    <div className="rounded-2xl bg-amber-50/60 border border-amber-200/50 p-5">
-                      <p className="text-sm text-amber-800 mb-2">
-                        No accountability partners found for this email.
+                  {/* Inline partner entry — no partners or fetch failed */}
+                  {showPartnerEntry && (
+                    <div className="rounded-2xl border border-black/[0.06] bg-surface/50 p-5 space-y-4">
+                      <p className="text-sm text-muted">
+                        Add an accountability partner so someone you trust is
+                        notified if protection is removed.
                       </p>
-                      <Link
-                        href={`/setup?email=${encodeURIComponent(email)}`}
-                        className="text-sm font-medium text-gold hover:text-gold-hover transition-colors"
+                      <div>
+                        <label className="block text-[11px] tracking-[0.15em] uppercase text-muted mb-2">
+                          Partner Name
+                        </label>
+                        <input
+                          type="text"
+                          value={inlinePartner.name}
+                          onChange={(e) =>
+                            setInlinePartner((s) => ({
+                              ...s,
+                              name: e.target.value,
+                            }))
+                          }
+                          className="input"
+                          placeholder="Their name"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] tracking-[0.15em] uppercase text-muted mb-2">
+                          Partner Telegram
+                        </label>
+                        <input
+                          type="text"
+                          value={inlinePartner.telegram}
+                          onChange={(e) =>
+                            setInlinePartner((s) => ({
+                              ...s,
+                              telegram: e.target.value,
+                            }))
+                          }
+                          className="input"
+                          placeholder="@username or numeric chat ID"
+                        />
+                      </div>
+                      {partnerAddError && (
+                        <p className="text-sm text-red-500">
+                          {partnerAddError}
+                        </p>
+                      )}
+                      <button
+                        type="button"
+                        disabled={
+                          addingPartner ||
+                          !inlinePartner.name ||
+                          !inlinePartner.telegram
+                        }
+                        onClick={handleAddInlinePartner}
+                        className="btn btn-secondary w-full text-sm"
                       >
-                        Set up your account first →
-                      </Link>
+                        {addingPartner ? "Adding\u2026" : "Add Partner +"}
+                      </button>
+                      {partnerFetchFailed && (
+                        <p className="text-xs text-muted-light">
+                          Could not check existing partners. You can add one
+                          above or{" "}
+                          <Link
+                            href={`/setup?email=${encodeURIComponent(email)}`}
+                            className="text-gold hover:underline"
+                          >
+                            set up your account
+                          </Link>
+                          .
+                        </p>
+                      )}
                     </div>
                   )}
 
@@ -232,36 +352,39 @@ function DownloadContent() {
 
                   <button
                     type="submit"
-                    disabled={loading || noPartners}
+                    disabled={loading}
                     className="btn btn-primary w-full"
                   >
                     {loading ? "Enrolling\u2026" : "Get iOS Profile →"}
                   </button>
                 </form>
               ) : (
-                <div className="card p-8 sm:p-10 max-w-lg animate-fade-in">
-                  <p className="text-sm text-muted mb-6">
-                    Scan this QR code on your iPhone to install the profile:
-                  </p>
-                  <div className="bg-white rounded-2xl border border-black/[0.06] p-5 inline-block mb-10 shadow-sm">
-                    <QRCodeSVG value={downloadUrl} size={180} />
+                /* ── Success: Profile Ready ─────────────── */
+                <div className="bg-[#0a0a0a] rounded-2xl p-8 sm:p-12 max-w-lg animate-fade-in">
+                  <h3 className="font-serif text-3xl sm:text-4xl text-white mb-6 tracking-tight">
+                    Profile Ready
+                  </h3>
+
+                  <a
+                    href={downloadUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block text-gold hover:text-gold-hover text-base sm:text-lg break-all leading-relaxed mb-8 transition-colors underline underline-offset-4"
+                  >
+                    {downloadUrl}
+                  </a>
+
+                  <div className="bg-white rounded-xl p-5 inline-block mb-8">
+                    <QRCodeSVG value={downloadUrl} size={200} />
                   </div>
-                  <h4 className="font-serif text-lg mb-5">
-                    Install Instructions
-                  </h4>
-                  <ol className="space-y-4">
-                    {installSteps.map((s, i) => (
-                      <li
-                        key={i}
-                        className="flex gap-3.5 text-sm text-muted leading-relaxed"
-                      >
-                        <span className="text-gold shrink-0 font-serif text-base">
-                          {i + 1}.
-                        </span>
-                        {s}
-                      </li>
-                    ))}
-                  </ol>
+
+                  <p className="text-white text-lg font-semibold leading-snug mb-3">
+                    Open this link on your iPhone in Safari to install
+                    protection
+                  </p>
+                  <p className="text-white/50 text-sm">
+                    The link expires in 24 hours
+                  </p>
                 </div>
               )}
             </section>

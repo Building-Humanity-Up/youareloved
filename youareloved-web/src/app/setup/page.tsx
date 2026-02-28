@@ -2,7 +2,6 @@
 
 import { useState, useEffect, Suspense, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import Link from "next/link";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
 
@@ -84,16 +83,21 @@ function SetupContent() {
 
   const fetchPartners = useCallback(async (userEmail: string) => {
     setFetchingPartners(true);
+    console.log("[YAL setup] Fetching partners for:", userEmail);
     try {
-      const res = await fetch(
-        `https://api.finallyfreeai.com/account/partners?email=${encodeURIComponent(userEmail)}`,
-      );
+      const url = `https://api.finallyfreeai.com/account/partners?email=${encodeURIComponent(userEmail)}`;
+      const res = await fetch(url);
+      console.log("[YAL setup] Partners response:", res.status, res.statusText);
       if (res.ok) {
         const data = await res.json();
-        if (data.partners?.length) setPartners(data.partners);
+        console.log("[YAL setup] Partners data:", JSON.stringify(data));
+        const list = data.partners || data.data?.partners || [];
+        if (list.length) setPartners(list);
+      } else {
+        console.warn("[YAL setup] Non-OK response:", res.status);
       }
-    } catch {
-      /* silent — partners just start empty */
+    } catch (err) {
+      console.error("[YAL setup] Fetch failed (likely CORS):", err);
     } finally {
       setFetchingPartners(false);
     }
@@ -111,6 +115,7 @@ function SetupContent() {
     setError(null);
 
     try {
+      console.log("[YAL setup] Adding partner:", newPartner);
       const res = await fetch(
         "https://api.finallyfreeai.com/account/partners",
         {
@@ -124,6 +129,7 @@ function SetupContent() {
           }),
         },
       );
+      console.log("[YAL setup] Add partner response:", res.status);
 
       if (!res.ok) throw new Error("Failed");
 
@@ -136,7 +142,8 @@ function SetupContent() {
         },
       ]);
       setNewPartner({ name: "", telegram: "", email: "" });
-    } catch {
+    } catch (err) {
+      console.error("[YAL setup] Add partner error:", err);
       setError("Could not add partner. Please try again.");
     } finally {
       setAddingPartner(false);
@@ -144,17 +151,19 @@ function SetupContent() {
   };
 
   const handleContinueToInstall = () => {
-    const params = new URLSearchParams({
-      email,
-      name: firstName,
-    });
-    router.push(`/download?${params.toString()}`);
+    const params = new URLSearchParams();
+    params.set("email", email);
+    params.set("name", firstName);
+    const url = `/download?${params.toString()}`;
+    console.log("[YAL setup] Navigating to:", url);
+    router.push(url);
   };
 
-  // Pre-fill from URL and auto-advance if email exists
   useEffect(() => {
     const urlEmail = searchParams.get("email");
     if (urlEmail) setEmail(urlEmail);
+    const urlName = searchParams.get("name");
+    if (urlName) setFirstName(urlName);
   }, [searchParams]);
 
   return (
@@ -222,7 +231,6 @@ function SetupContent() {
                 protection is ever removed.
               </p>
 
-              {/* Existing partners */}
               {fetchingPartners && (
                 <p className="text-sm text-muted-light text-center mb-6">
                   Checking for existing partners&hellip;
@@ -323,7 +331,6 @@ function SetupContent() {
                 </button>
               </form>
 
-              {/* Continue */}
               {partners.length > 0 ? (
                 <button
                   onClick={handleContinueToInstall}
