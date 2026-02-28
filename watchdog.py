@@ -496,6 +496,9 @@ def check_for_updates():
 # ---------------------------------------------------------------------------
 
 def main():
+    os.chdir("/tmp")
+    sys.dont_write_bytecode = True
+
     log.info("=" * 40)
     log.info("Watchdog started")
     log.info(f"  Guardian: {_get_guardian_path()}")

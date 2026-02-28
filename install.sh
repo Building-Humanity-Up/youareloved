@@ -597,6 +597,8 @@ sudo tee "$WATCHDOG_PLIST" > /dev/null << EOF
         <string>${HOME}</string>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin</string>
+        <key>PYTHONDONTWRITEBYTECODE</key>
+        <string>1</string>
     </dict>
 </dict>
 </plist>
