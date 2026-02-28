@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import { useLanguage } from "@/contexts/LanguageContext";
 import LanguageSelector from "./LanguageSelector";
 
@@ -26,11 +27,27 @@ export default function Navbar() {
     >
       <div className="mx-auto max-w-7xl px-6 lg:px-8">
         <div className="flex h-16 items-center justify-between">
-          <Link
-            href="/"
-            className="font-serif text-lg tracking-tight select-none"
-          >
-            You Are Loved
+
+          {/* Brand mark — wordmark on desktop, icon on mobile */}
+          <Link href="/" className="flex items-center select-none shrink-0" aria-label="Finally Free">
+            <Image
+              src="/brand/FF-Wordmark-Black.png"
+              alt="Finally Free"
+              width={130}
+              height={24}
+              className="hidden md:block"
+              priority
+              style={{ width: "auto", height: 24, objectFit: "contain" }}
+            />
+            <Image
+              src="/brand/FF-Icon-Black.png"
+              alt="Finally Free"
+              width={28}
+              height={28}
+              className="block md:hidden"
+              priority
+              style={{ width: 28, height: 28, objectFit: "contain" }}
+            />
           </Link>
 
           <div className="hidden md:flex items-center gap-6">

@@ -3,6 +3,7 @@
 import { useState, useEffect, Suspense, useCallback } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
+import Image from "next/image";
 import { QRCodeSVG } from "qrcode.react";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
@@ -390,6 +391,14 @@ function DownloadContent() {
               ) : (
                 /* ── Success: Profile Ready ─────────────── */
                 <div className="bg-[#0a0a0a] rounded-2xl p-8 sm:p-12 max-w-lg animate-fade-in">
+                  <Image
+                    src="/brand/FF-Icon-White.png"
+                    alt="Finally Free"
+                    width={28}
+                    height={28}
+                    className="mb-6 opacity-90"
+                    style={{ width: 28, height: 28, objectFit: "contain" }}
+                  />
                   <h3 className="font-serif text-3xl sm:text-4xl text-white mb-6 tracking-tight">
                     Profile Ready
                   </h3>
