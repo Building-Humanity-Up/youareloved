@@ -138,6 +138,13 @@ def generate_mobileconfig(device_token: str, firstname: str) -> str:
 def health():
     return jsonify({"status": "ok", "service": "yal-ios"})
 
+@app.route("/cron/check-silence", methods=["POST"])
+def cron_check_silence():
+    if request.headers.get("X-Cron-Secret") != os.environ.get("CRON_SECRET", "yal-cron-2026"):
+        abort(403)
+    check_silence()
+    return jsonify({"status": "ok"})
+
 @app.route("/debug/devices", methods=["GET"])
 def debug_devices():
     if request.args.get("secret") != "yal-debug-2026":
