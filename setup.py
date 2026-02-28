@@ -62,13 +62,16 @@ BG = "#000000"
 FG = "#FFFFFF"
 GREY = "#888888"
 DARK_GREY = "#222222"
+YELLOW = "#FFD60A"
+GREEN = "#44CC44"
+RED = "#FF6666"
 FONT = ("SF Pro Display", 13)
 FONT_TITLE = ("SF Pro Display", 28, "bold")
 FONT_SUB = ("SF Pro Display", 13)
 FONT_SMALL = ("SF Pro Display", 11)
 FONT_BTN = ("SF Pro Display", 13, "bold")
 FONT_MONO = ("SF Mono", 11)
-WIN_W, WIN_H = 520, 680
+WIN_W, WIN_H = 520, 720
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +263,121 @@ def api_get(path: str) -> dict:
     req = urllib.request.Request(f"{API_BASE}{path}")
     resp = urllib.request.urlopen(req, timeout=10)
     return json.loads(resp.read().decode())
+
+
+def verify_accessibility() -> bool:
+    """Check if Accessibility (AX) permission is granted."""
+    try:
+        r = subprocess.run(
+            [PYTHON_REAL, "-c", """
+import sys
+try:
+    from ApplicationServices import AXIsProcessTrusted
+    print("yes" if AXIsProcessTrusted() else "no")
+except Exception:
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to get name of first process'],
+            capture_output=True, timeout=5)
+        print("yes" if r.returncode == 0 else "no")
+    except Exception:
+        print("no")
+"""],
+            capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() == "yes"
+    except Exception:
+        return False
+
+
+def open_accessibility_settings():
+    """Open System Settings to the Accessibility pane."""
+    try:
+        subprocess.run([
+            "open",
+            "x-apple.systempreferences:com.apple.preference.security"
+            "?Privacy_Accessibility"
+        ], capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
+def _draw_settings_diagram(canvas, w, h, highlight_section, highlight_item):
+    """Draw a simplified System Settings visual on a tkinter Canvas.
+
+    highlight_section: text to highlight in the sidebar (e.g. "Privacy & Security")
+    highlight_item: text for the right pane row (e.g. "Screen Recording")
+    """
+    canvas.delete("all")
+
+    # Window chrome
+    rx, ry, rw, rh = 20, 10, w - 40, h - 20
+    canvas.create_rectangle(rx, ry, rx + rw, ry + rh,
+                            outline="#555555", width=1, fill="#1A1A1A")
+    # Title bar
+    canvas.create_rectangle(rx, ry, rx + rw, ry + 24,
+                            outline="#555555", fill="#2A2A2A")
+    canvas.create_text(rx + rw // 2, ry + 12,
+                       text="System Settings", fill=GREY,
+                       font=("SF Pro Display", 9))
+    # Traffic lights
+    for i, c in enumerate(["#FF5F57", "#FEBC2E", "#28C840"]):
+        canvas.create_oval(rx + 8 + i * 16, ry + 6, rx + 20 + i * 16, ry + 18,
+                           fill=c, outline="")
+
+    # Sidebar
+    sidebar_w = rw // 3
+    canvas.create_line(rx + sidebar_w, ry + 24, rx + sidebar_w, ry + rh,
+                       fill="#333333")
+    sidebar_items = ["General", "Appearance", highlight_section, "Notifications"]
+    for i, item in enumerate(sidebar_items):
+        iy = ry + 36 + i * 22
+        if item == highlight_section:
+            canvas.create_rectangle(rx + 4, iy - 2, rx + sidebar_w - 4, iy + 16,
+                                    fill="#3A3A3A", outline="")
+            canvas.create_text(rx + 14, iy + 7, text=item, fill=FG,
+                               font=("SF Pro Display", 9, "bold"), anchor="w")
+            # Arrow from sidebar to right pane
+            ax = rx + sidebar_w + 6
+            canvas.create_text(ax, iy + 7, text="\u2192", fill=YELLOW,
+                               font=("SF Pro Display", 12))
+        else:
+            canvas.create_text(rx + 14, iy + 7, text=item, fill="#666666",
+                               font=("SF Pro Display", 9), anchor="w")
+
+    # Right pane
+    pane_x = rx + sidebar_w + 16
+    pane_y = ry + 36
+    pane_items = ["Accessibility", highlight_item, "Files and Folders"]
+    if highlight_item == "Accessibility":
+        pane_items = [highlight_item, "Screen Recording", "Files and Folders"]
+    for i, item in enumerate(pane_items):
+        iy = pane_y + i * 26
+        if item == highlight_item:
+            canvas.create_rectangle(pane_x - 4, iy - 2,
+                                    rx + rw - 8, iy + 20,
+                                    fill="#3A3A3A", outline="")
+            canvas.create_text(pane_x + 4, iy + 9, text=item, fill=FG,
+                               font=("SF Pro Display", 10, "bold"), anchor="w")
+            # Toggle indicator
+            tx = rx + rw - 32
+            canvas.create_oval(tx, iy + 2, tx + 16, iy + 16,
+                               fill=GREEN, outline="")
+            # Arrow pointing at the toggle
+            canvas.create_text(tx - 10, iy + 9, text="\u2190", fill=YELLOW,
+                               font=("SF Pro Display", 12))
+        else:
+            canvas.create_text(pane_x + 4, iy + 9, text=item, fill="#555555",
+                               font=("SF Pro Display", 9), anchor="w")
+
+    # "Python" sub-row under the highlighted item
+    py_y = pane_y + pane_items.index(highlight_item) * 26 + 24
+    canvas.create_text(pane_x + 20, py_y + 6, text="Python 3.11",
+                       fill=GREY, font=("SF Pro Display", 9), anchor="w")
+    tx2 = rx + rw - 32
+    canvas.create_oval(tx2, py_y, tx2 + 16, py_y + 12,
+                       fill=GREEN, outline="")
 
 
 # ---------------------------------------------------------------------------
@@ -617,62 +735,69 @@ class SetupApp:
         self.partners = partners
         self.show_screen_access()
 
-    # --- Screen 3: Screen Access (verification gate) ---
+    # --- Screen 3: Screen Recording (verification gate) ---
 
     def show_screen_access(self):
         self.clear()
         self.screen_verified = False
 
-        tk.Label(self.container, text="Screen Access",
+        tk.Label(self.container, text="Screen Recording",
                  font=("SF Pro Display", 20, "bold"),
-                 fg=FG, bg=BG).pack(anchor="w", pady=(20, 12))
+                 fg=FG, bg=BG).pack(anchor="w", pady=(10, 4))
 
         tk.Label(self.container,
-                 text="Protection needs permission to see your screen.\n"
-                      "This is what lets it detect and close harmful content.",
+                 text="Guardian needs to see your screen to detect content.",
                  font=FONT_SUB, fg=GREY, bg=BG, wraplength=440,
-                 justify="left").pack(anchor="w", pady=(0, 20))
+                 justify="left").pack(anchor="w", pady=(0, 10))
+
+        # Visual diagram
+        self.sr_canvas = tk.Canvas(self.container, width=WIN_W - 80,
+                                   height=140, bg=BG, highlightthickness=0)
+        self.sr_canvas.pack(pady=(0, 8))
+        _draw_settings_diagram(self.sr_canvas, WIN_W - 80, 140,
+                               "Privacy & Security", "Screen Recording")
 
         # Status area
         self.sr_status_frame = tk.Frame(self.container, bg=BG)
-        self.sr_status_frame.pack(fill="x", pady=(0, 16))
+        self.sr_status_frame.pack(fill="x", pady=(0, 6))
 
         self.sr_status_icon = tk.Label(self.sr_status_frame,
-                                        text="○", font=("SF Pro Display", 16),
-                                        fg=GREY, bg=BG)
+                                       text="\u25cb",
+                                       font=("SF Pro Display", 16),
+                                       fg=GREY, bg=BG)
         self.sr_status_icon.pack(side="left", padx=(0, 10))
         self.sr_status_text = tk.Label(self.sr_status_frame,
-                                        text="Checking...",
-                                        font=FONT, fg=GREY, bg=BG)
+                                       text="Checking\u2026",
+                                       font=FONT, fg=GREY, bg=BG)
         self.sr_status_text.pack(side="left")
 
-        # Instructions (hidden initially, shown if verification fails)
-        self.sr_instructions = tk.Frame(self.container, bg=BG)
-        self.sr_instructions.pack(fill="x", pady=(0, 10))
+        # Steps area (shown when not yet verified)
+        self.sr_steps = tk.Frame(self.container, bg=BG)
+        self.sr_steps.pack(fill="x", pady=(0, 4))
+        self._sr_build_steps()
 
-        # Path display
+        # Path display (hidden initially)
         self.sr_path_frame = tk.Frame(self.container, bg=DARK_GREY,
-                                       highlightthickness=1,
-                                       highlightbackground="#333333")
-        self.sr_path_frame.pack(fill="x", pady=(0, 16))
+                                      highlightthickness=1,
+                                      highlightbackground="#333333")
         self.sr_path_label = tk.Label(self.sr_path_frame,
-                                       text=PYTHON_REAL,
-                                       font=FONT_MONO, fg=GREY, bg=DARK_GREY,
-                                       wraplength=420, justify="left")
-        self.sr_path_label.pack(padx=12, pady=8, anchor="w")
+                                      text=PYTHON_REAL,
+                                      font=FONT_MONO, fg=GREY, bg=DARK_GREY,
+                                      wraplength=420, justify="left")
+        self.sr_path_label.pack(padx=12, pady=6, anchor="w")
 
-        # Copy button
+        # Copy button (hidden initially)
         self.sr_copy_btn = tk.Button(
             self.container, text="Copy Path to Clipboard",
-            command=lambda: self._copy_path(),
+            command=self._copy_path,
             bg=DARK_GREY, fg=FG, font=FONT_SMALL,
             relief="flat", bd=0, cursor="hand2",
             activebackground="#333333")
-        self.sr_copy_btn.pack(anchor="w", pady=(0, 16))
 
         # Continue button (disabled until verified)
         self.sr_continue_btn = self.make_button(
-            self.container, "Continue", self.start_install, enabled=False)
+            self.container, "Continue",
+            self.show_accessibility, enabled=False)
         self.sr_continue_btn.pack(fill="x", ipady=4, side="bottom")
 
         # Skip link (after several failed attempts)
@@ -681,120 +806,105 @@ class SetupApp:
 
         self.sr_attempt_count = 0
 
-        # Hide instructions and path initially
-        self.sr_instructions.pack_forget()
-        self.sr_path_frame.pack_forget()
-        self.sr_copy_btn.pack_forget()
-
         # Trigger TCC pre-population and start checking
         threading.Thread(target=self._sr_initial_check, daemon=True).start()
 
+    def _sr_build_steps(self):
+        """Populate numbered steps."""
+        for w in self.sr_steps.winfo_children():
+            w.destroy()
+        tk.Label(self.sr_steps, text="Here's exactly what to do:",
+                 font=("SF Pro Display", 11, "bold"),
+                 fg=FG, bg=BG).pack(anchor="w", pady=(0, 4))
+        steps = [
+            "Open System Settings \u2192 Privacy & Security",
+            "Click Screen Recording",
+            "Find Python and toggle it ON",
+            "If Python isn't listed: click +, press\n"
+            "Cmd+Shift+G, paste the path below, click Open",
+        ]
+        for i, s in enumerate(steps, 1):
+            row = tk.Frame(self.sr_steps, bg=BG)
+            row.pack(fill="x", pady=1)
+            tk.Label(row, text=f"{i}.", font=FONT_SMALL, fg=YELLOW,
+                     bg=BG, width=2).pack(side="left", anchor="n")
+            tk.Label(row, text=s, font=FONT_SMALL, fg=GREY, bg=BG,
+                     wraplength=400, justify="left").pack(side="left",
+                                                          anchor="w")
+
     def _sr_initial_check(self):
-        """Trigger TCC, wait, then verify."""
         trigger_tcc_prepopulation()
-        import time
         time.sleep(1)
         result = verify_screen_recording()
         self.root.after(0, lambda: self._sr_handle_result(result))
 
     def _sr_handle_result(self, result: str):
-        """Update UI based on verification result."""
         if result == "yes":
             self.screen_verified = True
-            self.sr_status_icon.configure(text="✓", fg="#44CC44")
+            self.sr_status_icon.configure(text="\u2713", fg=GREEN)
             self.sr_status_text.configure(
                 text="Screen Recording is enabled.", fg=FG)
-            # Hide instructions if shown
-            self.sr_instructions.pack_forget()
+            self.sr_steps.pack_forget()
             self.sr_path_frame.pack_forget()
             self.sr_copy_btn.pack_forget()
             self.sr_skip_frame.pack_forget()
-            # Enable continue
             self.sr_continue_btn.configure(
                 state="normal", bg=FG, fg=BG, cursor="hand2")
         elif result == "wallpaper":
             self.sr_attempt_count += 1
-            self.sr_status_icon.configure(text="◐", fg=YELLOW)
+            self.sr_status_icon.configure(text="\u25d0", fg=RED)
             self.sr_status_text.configure(
-                text="Seeing wallpaper only — wrong binary may be enabled.",
-                fg=YELLOW)
-            self._sr_show_instructions(wallpaper=True)
+                text="Almost \u2014 wrong Python selected.\n"
+                     "Make sure the path below is toggled ON:",
+                fg=RED)
+            self._sr_show_path_and_buttons()
         else:
             self.sr_attempt_count += 1
-            self.sr_status_icon.configure(text="○", fg="#FF6666")
+            self.sr_status_icon.configure(text="\u25cb", fg=RED)
             self.sr_status_text.configure(
-                text="Screen Recording not enabled yet.", fg="#FF6666")
-            self._sr_show_instructions(wallpaper=False)
-            # Open Settings automatically on first failure
+                text="Screen Recording not enabled yet.", fg=RED)
+            self._sr_show_path_and_buttons()
             if self.sr_attempt_count == 1:
                 open_screen_recording_settings()
 
-    def _sr_show_instructions(self, wallpaper: bool = False):
-        """Show step-by-step instructions."""
-        # Clear previous instructions
-        for w in self.sr_instructions.winfo_children():
+    def _sr_show_path_and_buttons(self):
+        self.sr_path_frame.pack(fill="x", pady=(4, 4),
+                                before=self.sr_continue_btn)
+        self.sr_copy_btn.pack(anchor="w", pady=(2, 4),
+                              before=self.sr_continue_btn)
+
+        # Rebuild steps area with action buttons
+        for w in self.sr_steps.winfo_children():
             w.destroy()
 
-        if wallpaper:
-            tk.Label(self.sr_instructions,
-                     text="The permission may be granted to a different\n"
-                          "Python binary. Make sure this exact path is enabled:",
-                     font=FONT_SMALL, fg=GREY, bg=BG, wraplength=440,
-                     justify="left").pack(anchor="w", pady=(0, 4))
-        else:
-            tk.Label(self.sr_instructions,
-                     text="In System Settings → Screen Recording:\n"
-                          "Look for Python and toggle it ON.\n\n"
-                          "If Python isn't listed, click + at the bottom,\n"
-                          "press Cmd+Shift+G, paste the path below, click Open.",
-                     font=FONT_SMALL, fg=GREY, bg=BG, wraplength=440,
-                     justify="left").pack(anchor="w", pady=(0, 4))
+        tk.Button(self.sr_steps,
+                  text="Open Screen Recording Settings",
+                  command=open_screen_recording_settings,
+                  bg=DARK_GREY, fg=FG, font=FONT_SMALL,
+                  relief="flat", bd=0, cursor="hand2",
+                  activebackground="#333333").pack(anchor="w", pady=(4, 2))
 
-        # Show all the hidden elements
-        self.sr_instructions.pack(fill="x", pady=(0, 10),
-                                   before=self.sr_continue_btn)
-        self.sr_path_frame.pack(fill="x", pady=(0, 16),
-                                 before=self.sr_continue_btn)
-        self.sr_copy_btn.pack(anchor="w", pady=(0, 16),
-                               before=self.sr_continue_btn)
+        tk.Button(self.sr_steps,
+                  text="I've enabled it \u2014 check again",
+                  command=self._sr_recheck,
+                  bg=DARK_GREY, fg=FG, font=FONT_SMALL,
+                  relief="flat", bd=0, cursor="hand2",
+                  activebackground="#333333").pack(anchor="w", pady=(2, 0))
 
-        # Open Settings button
-        open_btn = tk.Button(
-            self.sr_instructions,
-            text="Open Screen Recording Settings",
-            command=open_screen_recording_settings,
-            bg=DARK_GREY, fg=FG, font=FONT_SMALL,
-            relief="flat", bd=0, cursor="hand2",
-            activebackground="#333333")
-        open_btn.pack(anchor="w", pady=(8, 0))
-
-        # "I've enabled it" check button
-        check_btn = tk.Button(
-            self.sr_instructions,
-            text="I've enabled it — check again",
-            command=self._sr_recheck,
-            bg=DARK_GREY, fg=FG, font=FONT_SMALL,
-            relief="flat", bd=0, cursor="hand2",
-            activebackground="#333333")
-        check_btn.pack(anchor="w", pady=(8, 0))
-
-        # After 3+ failed attempts, show skip option
         if self.sr_attempt_count >= 3:
             for w in self.sr_skip_frame.winfo_children():
                 w.destroy()
             tk.Button(self.sr_skip_frame,
-                      text="Skip for now — I'll fix this later",
+                      text="Skip for now \u2014 I'll fix this later",
                       command=self._sr_skip,
                       bg=BG, fg="#666666", font=FONT_SMALL,
                       relief="flat", bd=0, cursor="hand2",
                       activebackground=BG).pack(anchor="center")
             self.sr_skip_frame.pack(fill="x", side="bottom", pady=(8, 0))
 
-        # Also auto-poll every 3 seconds (in case user enables without clicking)
         self._sr_schedule_autopoll()
 
     def _sr_schedule_autopoll(self):
-        """Auto-check every 3 seconds in background."""
         if self.screen_verified:
             return
 
@@ -803,16 +913,14 @@ class SetupApp:
             if result == "yes":
                 self.root.after(0, lambda: self._sr_handle_result("yes"))
             else:
-                # Schedule next poll
                 self._sr_check_after_id = self.root.after(
                     3000, self._sr_schedule_autopoll)
 
         threading.Thread(target=_poll, daemon=True).start()
 
     def _sr_recheck(self):
-        """Manual re-check button."""
-        self.sr_status_icon.configure(text="○", fg=GREY)
-        self.sr_status_text.configure(text="Checking...", fg=GREY)
+        self.sr_status_icon.configure(text="\u25cb", fg=GREY)
+        self.sr_status_text.configure(text="Checking\u2026", fg=GREY)
 
         def _check():
             result = verify_screen_recording()
@@ -821,16 +929,242 @@ class SetupApp:
         threading.Thread(target=_check, daemon=True).start()
 
     def _sr_skip(self):
-        """Allow skipping after multiple failed attempts — with warning."""
-        self.screen_verified = False  # Will be noted in config
-        self.start_install()
+        self.screen_verified = False
+        self.show_accessibility()
 
     def _copy_path(self):
-        """Copy resolved Python path to clipboard and show feedback."""
         copy_to_clipboard(PYTHON_REAL)
-        self.sr_copy_btn.configure(text="Copied ✓")
+        self.sr_copy_btn.configure(text="Copied \u2713")
         self.root.after(2000, lambda: self.sr_copy_btn.configure(
             text="Copy Path to Clipboard"))
+
+    # --- Screen 3b: Accessibility Permission ---
+
+    def show_accessibility(self):
+        self.clear()
+        self.ax_verified = False
+
+        tk.Label(self.container, text="Accessibility",
+                 font=("SF Pro Display", 20, "bold"),
+                 fg=FG, bg=BG).pack(anchor="w", pady=(10, 4))
+
+        tk.Label(self.container,
+                 text="Required to detect browser tab content\n"
+                      "and close windows when harmful content is found.",
+                 font=FONT_SUB, fg=GREY, bg=BG, wraplength=440,
+                 justify="left").pack(anchor="w", pady=(0, 10))
+
+        # Visual diagram
+        ax_canvas = tk.Canvas(self.container, width=WIN_W - 80,
+                              height=140, bg=BG, highlightthickness=0)
+        ax_canvas.pack(pady=(0, 8))
+        _draw_settings_diagram(ax_canvas, WIN_W - 80, 140,
+                               "Privacy & Security", "Accessibility")
+
+        # Status
+        ax_status_frame = tk.Frame(self.container, bg=BG)
+        ax_status_frame.pack(fill="x", pady=(0, 6))
+
+        self.ax_status_icon = tk.Label(ax_status_frame,
+                                       text="\u25cb",
+                                       font=("SF Pro Display", 16),
+                                       fg=GREY, bg=BG)
+        self.ax_status_icon.pack(side="left", padx=(0, 10))
+        self.ax_status_text = tk.Label(ax_status_frame,
+                                       text="Checking\u2026",
+                                       font=FONT, fg=GREY, bg=BG)
+        self.ax_status_text.pack(side="left")
+
+        # Steps
+        self.ax_steps = tk.Frame(self.container, bg=BG)
+        self.ax_steps.pack(fill="x", pady=(0, 4))
+        tk.Label(self.ax_steps, text="Here's exactly what to do:",
+                 font=("SF Pro Display", 11, "bold"),
+                 fg=FG, bg=BG).pack(anchor="w", pady=(0, 4))
+        steps = [
+            "Open System Settings \u2192 Privacy & Security",
+            "Click Accessibility",
+            "Find Python and toggle it ON",
+            "If Python isn't listed: click +, press\n"
+            "Cmd+Shift+G, paste the path below, click Open",
+        ]
+        for i, s in enumerate(steps, 1):
+            row = tk.Frame(self.ax_steps, bg=BG)
+            row.pack(fill="x", pady=1)
+            tk.Label(row, text=f"{i}.", font=FONT_SMALL, fg=YELLOW,
+                     bg=BG, width=2).pack(side="left", anchor="n")
+            tk.Label(row, text=s, font=FONT_SMALL, fg=GREY, bg=BG,
+                     wraplength=400, justify="left").pack(side="left",
+                                                          anchor="w")
+
+        # Path + copy
+        ax_path_frame = tk.Frame(self.container, bg=DARK_GREY,
+                                  highlightthickness=1,
+                                  highlightbackground="#333333")
+        ax_path_frame.pack(fill="x", pady=(4, 4))
+        tk.Label(ax_path_frame, text=PYTHON_REAL,
+                 font=FONT_MONO, fg=GREY, bg=DARK_GREY,
+                 wraplength=420, justify="left").pack(padx=12, pady=6,
+                                                      anchor="w")
+
+        self.ax_copy_btn = tk.Button(
+            self.container, text="Copy Path to Clipboard",
+            command=self._ax_copy_path,
+            bg=DARK_GREY, fg=FG, font=FONT_SMALL,
+            relief="flat", bd=0, cursor="hand2",
+            activebackground="#333333")
+        self.ax_copy_btn.pack(anchor="w", pady=(0, 4))
+
+        # Buttons
+        btn_frame = tk.Frame(self.container, bg=BG)
+        btn_frame.pack(fill="x", pady=(4, 0))
+
+        tk.Button(btn_frame,
+                  text="Open Accessibility Settings",
+                  command=open_accessibility_settings,
+                  bg=DARK_GREY, fg=FG, font=FONT_SMALL,
+                  relief="flat", bd=0, cursor="hand2",
+                  activebackground="#333333").pack(anchor="w", pady=(0, 2))
+
+        tk.Button(btn_frame,
+                  text="I've enabled it \u2014 check again",
+                  command=self._ax_recheck,
+                  bg=DARK_GREY, fg=FG, font=FONT_SMALL,
+                  relief="flat", bd=0, cursor="hand2",
+                  activebackground="#333333").pack(anchor="w", pady=(2, 0))
+
+        # Continue (disabled until verified)
+        self.ax_continue_btn = self.make_button(
+            self.container, "Continue",
+            self.show_permission_summary, enabled=False)
+        self.ax_continue_btn.pack(fill="x", ipady=4, side="bottom")
+
+        # Skip
+        self.ax_skip_frame = tk.Frame(self.container, bg=BG)
+        self.ax_skip_frame.pack(fill="x", side="bottom", pady=(8, 0))
+        self.ax_attempt_count = 0
+
+        # Start checking
+        threading.Thread(target=self._ax_initial_check, daemon=True).start()
+
+    def _ax_initial_check(self):
+        result = verify_accessibility()
+        self.root.after(0, lambda: self._ax_handle_result(result))
+
+    def _ax_handle_result(self, ok: bool):
+        if ok:
+            self.ax_verified = True
+            self.ax_status_icon.configure(text="\u2713", fg=GREEN)
+            self.ax_status_text.configure(
+                text="Accessibility is enabled.", fg=FG)
+            self.ax_continue_btn.configure(
+                state="normal", bg=FG, fg=BG, cursor="hand2")
+        else:
+            self.ax_attempt_count += 1
+            self.ax_status_icon.configure(text="\u25cb", fg=RED)
+            self.ax_status_text.configure(
+                text="Accessibility not enabled yet.", fg=RED)
+            if self.ax_attempt_count == 1:
+                open_accessibility_settings()
+            if self.ax_attempt_count >= 3:
+                for w in self.ax_skip_frame.winfo_children():
+                    w.destroy()
+                tk.Button(self.ax_skip_frame,
+                          text="Skip for now \u2014 I'll fix this later",
+                          command=self.show_permission_summary,
+                          bg=BG, fg="#666666", font=FONT_SMALL,
+                          relief="flat", bd=0, cursor="hand2",
+                          activebackground=BG).pack(anchor="center")
+                self.ax_skip_frame.pack(fill="x", side="bottom", pady=(8, 0))
+            self._ax_schedule_autopoll()
+
+    def _ax_schedule_autopoll(self):
+        if self.ax_verified:
+            return
+
+        def _poll():
+            if verify_accessibility():
+                self.root.after(0, lambda: self._ax_handle_result(True))
+            else:
+                self.root.after(3000, self._ax_schedule_autopoll)
+
+        threading.Thread(target=_poll, daemon=True).start()
+
+    def _ax_recheck(self):
+        self.ax_status_icon.configure(text="\u25cb", fg=GREY)
+        self.ax_status_text.configure(text="Checking\u2026", fg=GREY)
+
+        def _check():
+            ok = verify_accessibility()
+            self.root.after(0, lambda: self._ax_handle_result(ok))
+
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _ax_copy_path(self):
+        copy_to_clipboard(PYTHON_REAL)
+        self.ax_copy_btn.configure(text="Copied \u2713")
+        self.root.after(2000, lambda: self.ax_copy_btn.configure(
+            text="Copy Path to Clipboard"))
+
+    # --- Screen 3c: Permission Summary ---
+
+    def show_permission_summary(self):
+        self.clear()
+
+        spacer = tk.Frame(self.container, bg=BG, height=60)
+        spacer.pack()
+
+        tk.Label(self.container, text="Protection is now active.",
+                 font=("SF Pro Display", 22, "bold"),
+                 fg=FG, bg=BG).pack(pady=(0, 24))
+
+        # Permission checklist
+        perms = [
+            ("Screen Recording",
+             self.screen_verified,
+             "Detects harmful visual content"),
+            ("Accessibility",
+             getattr(self, "ax_verified", False),
+             "Reads browser tab content"),
+        ]
+        for name, ok, desc in perms:
+            row = tk.Frame(self.container, bg=BG)
+            row.pack(fill="x", pady=4)
+            icon = "\u2713" if ok else "\u2717"
+            color = GREEN if ok else RED
+            tk.Label(row, text=icon, font=("SF Pro Display", 16),
+                     fg=color, bg=BG, width=2).pack(side="left")
+            col = tk.Frame(row, bg=BG)
+            col.pack(side="left")
+            tk.Label(col, text=name, font=("SF Pro Display", 13, "bold"),
+                     fg=FG, bg=BG).pack(anchor="w")
+            tk.Label(col, text=desc, font=FONT_SMALL,
+                     fg=GREY, bg=BG).pack(anchor="w")
+
+        if not all(ok for _, ok, _ in perms):
+            tk.Label(self.container,
+                     text="Some permissions are missing.\n"
+                          "Guardian will alert your partners if\n"
+                          "screen access is unavailable.",
+                     font=FONT_SMALL, fg=YELLOW, bg=BG,
+                     justify="center").pack(pady=(12, 0))
+
+        # Partners list
+        partners = getattr(self, "partners", [])
+        if partners:
+            tk.Label(self.container,
+                     text="Your partners will be notified if\n"
+                          "protection is ever removed:",
+                     font=FONT_SUB, fg=GREY, bg=BG,
+                     justify="center").pack(pady=(24, 8))
+            for p in partners:
+                name = (p.get("name", "") or p.get("email", "") or "Partner")
+                tk.Label(self.container, text=f"\u2022  {name}",
+                         font=FONT, fg=FG, bg=BG).pack(anchor="w", padx=40)
+
+        btn = self.make_button(self.container, "Continue to Install",
+                               self.start_install)
+        btn.pack(fill="x", ipady=4, pady=(30, 0))
 
     # --- Screen 4: Installing ---
 
@@ -903,6 +1237,7 @@ class SetupApp:
                     Path.home() / "youareloved" / "guardian.py"),
                 "python_real_path": PYTHON_REAL,
                 "screen_recording_verified": self.screen_verified,
+                "accessibility_verified": getattr(self, "ax_verified", False),
                 "sendgrid_api_key": sg_key,
                 "telegram_bot_token": tg_token,
                 "anthropic_api_key": anthropic_key,

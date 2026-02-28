@@ -2300,6 +2300,120 @@ def run_image_only_main():
         time.sleep(next_interval)
 
 # ═══════════════════════════════════════════════════════════════════════════
+# SCREEN RECORDING PERMISSION MONITOR
+# ═══════════════════════════════════════════════════════════════════════════
+
+_sr_degraded = False          # track state across checks
+_SR_CHECK_INTERVAL = 300      # 5 minutes
+
+
+def _check_screen_recording_luminance() -> str:
+    """Classify screen capture quality using luminance std deviation.
+
+    Returns "yes" (std > 45 = full desktop), "wallpaper" (3-45), or "no".
+    """
+    try:
+        import Quartz
+        cg_img = Quartz.CGWindowListCreateImage(
+            Quartz.CGRectInfinite,
+            Quartz.kCGWindowListOptionOnScreenOnly,
+            Quartz.kCGNullWindowID,
+            Quartz.kCGWindowImageDefault)
+        if not cg_img or Quartz.CGImageGetWidth(cg_img) == 0:
+            return "no"
+        w = Quartz.CGImageGetWidth(cg_img)
+        h = Quartz.CGImageGetHeight(cg_img)
+        bpr = Quartz.CGImageGetBytesPerRow(cg_img)
+        data = bytes(Quartz.CGDataProviderCopyData(
+            Quartz.CGImageGetDataProvider(cg_img)))
+        if all(b == 0 for b in data[:2000]):
+            return "no"
+        from PIL import Image
+        pil = Image.frombuffer(
+            "RGBA", (w, h), data, "raw", "BGRA", bpr, 1).convert("L")
+        pixels = list(pil.getdata())[::4]
+        n = len(pixels)
+        mean = sum(pixels) / n
+        std = (sum((p - mean) ** 2 for p in pixels) / n) ** 0.5
+        if std > 45:
+            return "yes"
+        elif std > 3:
+            return "wallpaper"
+        return "no"
+    except Exception as e:
+        log.debug(f"  SR luminance check error: {e}")
+        return "no"
+
+
+def _get_user_firstname() -> str:
+    cfg = load_config()
+    partners = cfg.get("partners", [])
+    name = cfg.get("user_firstname", "") or cfg.get("firstname", "")
+    if not name:
+        name = socket.gethostname().split(".")[0].capitalize()
+    return name.capitalize()
+
+
+def _fire_permission_alert(message: str):
+    """Send a permission-related alert to all partners."""
+    partners = get_partners()
+    sg_key = get_sendgrid_key()
+    tg_token = get_telegram_token()
+    if not partners:
+        return
+
+    def _worker():
+        for partner in partners:
+            tg_chat = partner.get("telegram_chat_id", "")
+            email = partner.get("email", "")
+            if tg_token and tg_chat:
+                try:
+                    _send_telegram(tg_token, tg_chat, message)
+                except Exception as e:
+                    log.error(f"  Permission alert TG failed: {e}")
+            if sg_key and email:
+                try:
+                    _send_email_alert(
+                        sg_key, email,
+                        "[You Are Loved] Permission change", message)
+                except Exception as e:
+                    log.error(f"  Permission alert email failed: {e}")
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def screen_recording_monitor():
+    """Background thread: check Screen Recording every 5 minutes.
+
+    On degradation: alert partners, log PERMISSION_DEGRADED.
+    On restoration: alert partners, log PERMISSION_RESTORED.
+    """
+    global _sr_degraded
+    firstname = _get_user_firstname()
+
+    while True:
+        try:
+            result = _check_screen_recording_luminance()
+            if result != "yes" and not _sr_degraded:
+                _sr_degraded = True
+                log.warning("PERMISSION_DEGRADED — Screen Recording not working")
+                _fire_permission_alert(
+                    f"\u26a0\ufe0f Screen Recording permission was removed "
+                    f"from {firstname}\u2019s Mac.\n"
+                    f"Visual detection is disabled.")
+            elif result == "yes" and _sr_degraded:
+                _sr_degraded = False
+                log.info("PERMISSION_RESTORED — Screen Recording working again")
+                _fire_permission_alert(
+                    f"\u2705 Screen Recording restored on "
+                    f"{firstname}\u2019s Mac.")
+        except Exception as e:
+            log.error(f"  SR monitor error: {e}")
+
+        time.sleep(_SR_CHECK_INTERVAL)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -2353,6 +2467,22 @@ def main():
     log.info(f"  Audits: {len(list(AUDIT_DIR.glob('incident_*')))}")
 
     check_tamper()
+
+    # Start Screen Recording permission monitor
+    sr_result = _check_screen_recording_luminance()
+    if sr_result == "yes":
+        log.info(f"  Screen Recording: verified (luminance OK)")
+    else:
+        log.warning(f"  Screen Recording: DEGRADED ({sr_result})")
+        global _sr_degraded
+        _sr_degraded = True
+        firstname = _get_user_firstname()
+        _fire_permission_alert(
+            f"\u26a0\ufe0f Screen Recording permission was removed "
+            f"from {firstname}\u2019s Mac.\n"
+            f"Visual detection is disabled.")
+    threading.Thread(target=screen_recording_monitor,
+                     daemon=True, name="sr-monitor").start()
 
     while True:
         try:
