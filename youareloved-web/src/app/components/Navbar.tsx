@@ -2,10 +2,13 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
+import { useLanguage } from "@/contexts/LanguageContext";
+import LanguageSelector from "./LanguageSelector";
 
 export default function Navbar() {
   const [scrolled, setScrolled] = useState(false);
   const [open, setOpen] = useState(false);
+  const { t } = useLanguage();
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 20);
@@ -30,45 +33,49 @@ export default function Navbar() {
             You Are Loved
           </Link>
 
-          <div className="hidden md:flex items-center gap-8">
+          <div className="hidden md:flex items-center gap-6">
             <Link
               href="/#how-it-works"
               className="text-[13px] text-muted hover:text-foreground transition-colors"
             >
-              How It Works
+              {t.nav.howItWorks}
             </Link>
             <Link
               href="/#pricing"
               className="text-[13px] text-muted hover:text-foreground transition-colors"
             >
-              Pricing
+              {t.nav.pricing}
             </Link>
+            <LanguageSelector />
             <Link href="/download" className="btn btn-primary text-[13px] py-2 px-5">
-              Download
+              {t.nav.download}
             </Link>
           </div>
 
-          <button
-            onClick={() => setOpen(!open)}
-            className="md:hidden flex flex-col gap-[5px] p-2"
-            aria-label="Toggle menu"
-          >
-            <span
-              className={`block w-5 h-px bg-foreground transition-all duration-300 origin-center ${
-                open ? "rotate-45 translate-y-[3px]" : ""
-              }`}
-            />
-            <span
-              className={`block w-5 h-px bg-foreground transition-all duration-300 ${
-                open ? "opacity-0" : ""
-              }`}
-            />
-            <span
-              className={`block w-5 h-px bg-foreground transition-all duration-300 origin-center ${
-                open ? "-rotate-45 -translate-y-[3px]" : ""
-              }`}
-            />
-          </button>
+          <div className="flex items-center gap-3 md:hidden">
+            <LanguageSelector />
+            <button
+              onClick={() => setOpen(!open)}
+              className="flex flex-col gap-[5px] p-2"
+              aria-label="Toggle menu"
+            >
+              <span
+                className={`block w-5 h-px bg-foreground transition-all duration-300 origin-center ${
+                  open ? "rotate-45 translate-y-[3px]" : ""
+                }`}
+              />
+              <span
+                className={`block w-5 h-px bg-foreground transition-all duration-300 ${
+                  open ? "opacity-0" : ""
+                }`}
+              />
+              <span
+                className={`block w-5 h-px bg-foreground transition-all duration-300 origin-center ${
+                  open ? "-rotate-45 -translate-y-[3px]" : ""
+                }`}
+              />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -80,21 +87,21 @@ export default function Navbar() {
               onClick={() => setOpen(false)}
               className="text-sm text-muted hover:text-foreground transition-colors"
             >
-              How It Works
+              {t.nav.howItWorks}
             </Link>
             <Link
               href="/#pricing"
               onClick={() => setOpen(false)}
               className="text-sm text-muted hover:text-foreground transition-colors"
             >
-              Pricing
+              {t.nav.pricing}
             </Link>
             <Link
               href="/download"
               onClick={() => setOpen(false)}
               className="text-sm font-medium"
             >
-              Download
+              {t.nav.download}
             </Link>
           </div>
         </div>
