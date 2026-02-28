@@ -92,10 +92,39 @@ function DownloadContent() {
 
   useEffect(() => {
     const urlEmail = searchParams.get("email");
-    if (urlEmail) {
+    const urlName  = searchParams.get("name");
+    const token    = sessionStorage.getItem("yal_token");
+
+    if (token) {
+      // Signed-in user: fetch account info from token
+      fetch(`https://api.finallyfreeai.com/account/me?token=${encodeURIComponent(token)}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (!data) return;
+          if (data.email)     setEmail(data.email);
+          if (data.firstname) setFirstName(data.firstname);
+          if (Array.isArray(data.partners) && data.partners.length > 0) {
+            setPartners(
+              data.partners.map((p: Record<string, string>) => ({
+                name:     p.partner_name     ?? p.name     ?? "",
+                telegram: p.partner_telegram ?? p.telegram ?? "",
+                email:    p.partner_email    ?? p.email    ?? "",
+              })),
+            );
+            setPartnersChecked(true);
+          } else if (data.email) {
+            fetchPartners(data.email);
+          }
+        })
+        .catch(() => {
+          if (urlEmail) fetchPartners(urlEmail);
+        });
+    } else if (urlEmail) {
       setEmail(urlEmail);
       fetchPartners(urlEmail);
     }
+
+    if (urlName) setFirstName(urlName);
   }, [searchParams, fetchPartners]);
 
   const handleEmailBlur = () => {

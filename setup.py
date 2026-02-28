@@ -17,10 +17,13 @@ Guardian runs but sees nothing.
 import os
 import sys
 import json
+import hmac
+import time
 import secrets
 import hashlib
 import subprocess
 import threading
+import webbrowser
 import urllib.request
 from pathlib import Path
 from datetime import datetime
@@ -241,6 +244,24 @@ def copy_to_clipboard(text: str):
         pass
 
 
+API_BASE = "https://api.finallyfreeai.com"
+
+
+def api_post(path: str, payload: dict) -> dict:
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        f"{API_BASE}{path}", data=data,
+        headers={"Content-Type": "application/json"}, method="POST")
+    resp = urllib.request.urlopen(req, timeout=10)
+    return json.loads(resp.read().decode())
+
+
+def api_get(path: str) -> dict:
+    req = urllib.request.Request(f"{API_BASE}{path}")
+    resp = urllib.request.urlopen(req, timeout=10)
+    return json.loads(resp.read().decode())
+
+
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
@@ -266,6 +287,10 @@ class SetupApp:
         self.partner_telegrams = []
         self.screen_verified = False
         self._sr_check_after_id = None
+        # Account sign-in state
+        self.account_token = ""
+        self.account_email = ""
+        self.account_firstname = ""
 
         # API keys (pre-fill from existing config)
         existing = {}
@@ -282,7 +307,7 @@ class SetupApp:
         self.container = tk.Frame(self.root, bg=BG)
         self.container.pack(fill="both", expand=True, padx=40, pady=30)
 
-        self.show_welcome()
+        self.show_signin()
 
     def clear(self):
         # Cancel any pending after() callbacks
@@ -324,6 +349,142 @@ class SetupApp:
             entry.bind("<FocusIn>", on_focus_in)
             entry.bind("<FocusOut>", on_focus_out)
         return entry
+
+    # --- Screen 0: Sign In or Create Account ---
+
+    def show_signin(self):
+        self.clear()
+
+        spacer = tk.Frame(self.container, bg=BG, height=60)
+        spacer.pack()
+
+        tk.Label(self.container, text="Sign In",
+                 font=("SF Pro Display", 22, "bold"),
+                 fg=FG, bg=BG).pack(pady=(0, 6))
+
+        tk.Label(self.container,
+                 text="Sign in to restore your account\nand skip partner setup.",
+                 font=FONT_SUB, fg=GREY, bg=BG,
+                 justify="center").pack(pady=(0, 24))
+
+        tk.Label(self.container, text="Email", font=FONT_SMALL,
+                 fg=GREY, bg=BG).pack(anchor="w")
+        self._si_email = tk.StringVar(value=self.account_email)
+        self.make_entry(self.container, self._si_email,
+                        "you@example.com").pack(fill="x", ipady=5, pady=(2, 10))
+
+        tk.Label(self.container, text="Password", font=FONT_SMALL,
+                 fg=GREY, bg=BG).pack(anchor="w")
+        self._si_pw = tk.StringVar()
+        pw_entry = tk.Entry(self.container, bg=DARK_GREY, fg=FG, font=FONT,
+                            insertbackground=FG, relief="flat", bd=0,
+                            highlightthickness=1, highlightcolor=GREY,
+                            highlightbackground="#333333",
+                            textvariable=self._si_pw, show="\u2022")
+        pw_entry.pack(fill="x", ipady=5, pady=(2, 10))
+
+        self._si_status = tk.Label(self.container, text="",
+                                   font=FONT_SMALL, fg="#FF6666", bg=BG)
+        self._si_status.pack(anchor="w", pady=(0, 8))
+
+        self._si_btn = self.make_button(self.container, "Sign In",
+                                        self._do_signin)
+        self._si_btn.pack(fill="x", ipady=4, pady=(0, 10))
+
+        tk.Button(self.container,
+                  text="Create account at finallyfreeai.com \u2192",
+                  command=lambda: webbrowser.open("https://finallyfreeai.com/setup"),
+                  bg=BG, fg=GREY, font=FONT_SMALL,
+                  relief="flat", bd=0, cursor="hand2",
+                  activebackground=BG, activeforeground=FG).pack(pady=(0, 4))
+
+        tk.Button(self.container,
+                  text="Skip \u2014 set up manually instead",
+                  command=self.show_welcome,
+                  bg=BG, fg="#444444", font=FONT_SMALL,
+                  relief="flat", bd=0, cursor="hand2",
+                  activebackground=BG).pack(pady=(16, 0))
+
+    def _do_signin(self):
+        email = self._si_email.get().strip().lower()
+        pw    = self._si_pw.get().strip()
+        if not email or "@" not in email:
+            self._si_status.configure(text="Please enter a valid email.")
+            return
+        if not pw:
+            self._si_status.configure(text="Please enter your password.")
+            return
+        self._si_btn.configure(state="disabled", text="Signing in\u2026")
+        self._si_status.configure(text="")
+        threading.Thread(target=self._signin_thread,
+                         args=(email, pw), daemon=True).start()
+
+    def _signin_thread(self, email: str, pw: str):
+        try:
+            result = api_post("/account/login", {"email": email, "password": pw})
+            token     = result.get("token", "")
+            firstname = result.get("firstname", "")
+            if not token:
+                raise ValueError("No token in response")
+            me = api_get(f"/account/me?token={token}")
+            partners_raw = me.get("partners", [])
+            partners = [
+                {
+                    "email":            p.get("partner_email", ""),
+                    "telegram":         p.get("partner_telegram", ""),
+                    "telegram_chat_id": "",
+                    "name":             p.get("partner_name", ""),
+                }
+                for p in partners_raw
+            ]
+            self.root.after(0, lambda: self._signin_success(
+                token, email, firstname, partners))
+        except Exception as ex:
+            msg = str(ex)
+            if "401" in msg or "403" in msg:
+                msg = "Incorrect email or password."
+            elif "urlopen" in msg.lower() or "socket" in msg.lower():
+                msg = "Could not connect. Check your internet."
+            self.root.after(0, lambda: self._signin_error(msg))
+
+    def _signin_success(self, token: str, email: str,
+                        firstname: str, partners: list):
+        self.account_token     = token
+        self.account_email     = email
+        self.account_firstname = firstname
+        if partners:
+            self.partners = partners
+        self._show_signin_welcome(firstname, partners)
+
+    def _signin_error(self, msg: str):
+        self._si_btn.configure(state="normal", text="Sign In")
+        self._si_status.configure(text=msg)
+
+    def _show_signin_welcome(self, firstname: str, partners: list):
+        self.clear()
+
+        spacer = tk.Frame(self.container, bg=BG, height=120)
+        spacer.pack()
+
+        n = len(partners)
+        partner_text = (f"{n} partner{'s' if n != 1 else ''} ready"
+                        if partners else "no partners yet")
+
+        tk.Label(self.container,
+                 text=f"Welcome back, {firstname.capitalize()}.",
+                 font=("SF Pro Display", 22, "bold"),
+                 fg=FG, bg=BG).pack(pady=(0, 14))
+
+        tk.Label(self.container,
+                 text=f"Your {partner_text}.\n\n"
+                      "Partner setup will be skipped.\n"
+                      "Going straight to installing.",
+                 font=FONT_SUB, fg=GREY, bg=BG,
+                 justify="center").pack(pady=(0, 50))
+
+        btn = self.make_button(self.container, "Continue \u2192",
+                               self.show_screen_access)
+        btn.pack(fill="x", ipady=4)
 
     # --- Screen 1: Welcome ---
 
@@ -746,6 +907,10 @@ class SetupApp:
                 "telegram_bot_token": tg_token,
                 "anthropic_api_key": anthropic_key,
             }
+            if self.account_token:
+                cfg["account_token"] = self.account_token
+            if self.account_email:
+                cfg["user_email"] = self.account_email
             CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
 
             self._update_status("Notifying your partner(s)...", 60)

@@ -71,6 +71,8 @@ function SetupContent() {
   const [firstName, setFirstName] = useState(
     searchParams.get("name") || "",
   );
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [partners, setPartners] = useState<Partner[]>([]);
   const [newPartner, setNewPartner] = useState({
     name: "",
@@ -105,6 +107,28 @@ function SetupContent() {
 
   const goToStep2 = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (password !== confirmPassword) {
+      setError("Passwords do not match.");
+      return;
+    }
+    if (password.length < 8) {
+      setError("Password must be at least 8 characters.");
+      return;
+    }
+    setError(null);
+    try {
+      const res = await fetch("https://api.finallyfreeai.com/account/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, firstname: firstName, password }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.token) sessionStorage.setItem("yal_token", data.token);
+      }
+    } catch {
+      // Non-fatal — proceed to partner setup anyway
+    }
     setStep(2);
     await fetchPartners(email);
   };
@@ -213,6 +237,34 @@ function SetupContent() {
                     placeholder="Your first name"
                   />
                 </div>
+                <div>
+                  <label className="block text-[11px] tracking-[0.15em] uppercase text-muted mb-2.5">
+                    Password
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="input"
+                    placeholder="At least 8 characters"
+                    minLength={8}
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] tracking-[0.15em] uppercase text-muted mb-2.5">
+                    Confirm Password
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    className="input"
+                    placeholder="Repeat your password"
+                  />
+                </div>
+                {error && <p className="text-sm text-red-500">{error}</p>}
                 <button type="submit" className="btn btn-primary w-full">
                   Continue →
                 </button>

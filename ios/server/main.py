@@ -1,4 +1,4 @@
-import os, sqlite3, secrets, string, json, requests
+import os, sqlite3, secrets, string, json, requests, hmac, time, hashlib
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, send_file, abort
 from flask_cors import CORS
@@ -62,8 +62,39 @@ def init_db():
                 used         INTEGER DEFAULT 0
             )
         """)
+        
+        for col in ("password_hash TEXT", "account_token TEXT"):
+            try:
+                db.execute(f"ALTER TABLE users ADD COLUMN {col}")
+            except Exception:
+                pass
 
 init_db()
+
+# ── Auth helpers ──────────────────────────────────────────────────────────────
+
+try:
+    import bcrypt as _bcrypt
+    def hash_password(pw: str) -> str:
+        return _bcrypt.hashpw(pw.encode(), _bcrypt.gensalt()).decode()
+    def verify_password(pw: str, hsh: str) -> bool:
+        return _bcrypt.checkpw(pw.encode(), hsh.encode())
+except ImportError:
+    def hash_password(pw: str) -> str:
+        salt = os.urandom(16).hex()
+        h = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 260000).hex()
+        return f"{salt}${h}"
+    def verify_password(pw: str, hsh: str) -> bool:
+        try:
+            salt, h = hsh.split("$", 1)
+            return hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 260000).hex() == h
+        except Exception:
+            return False
+
+def make_account_token(email: str) -> str:
+    secret = os.environ.get("JWT_SECRET", "yal-secret").encode()
+    day = int(time.time() // 86400)
+    return hmac.new(secret, f"{email}:{day}".encode(), "sha256").hexdigest()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def send_telegram(chat_id: str, message: str):
@@ -171,20 +202,73 @@ def debug_users():
 
 @app.route("/account/register", methods=["POST"])
 def register():
-    """Create or update a user account."""
+    """Create or update a user account. Accepts optional password."""
     data      = request.json or {}
     email     = data.get("email", "").strip().lower()
     firstname = data.get("firstname", "").strip().lower()
+    password  = data.get("password", "").strip()
     if not email or not firstname:
         return jsonify({"error": "email and firstname required"}), 400
-    now = int(datetime.now(timezone.utc).timestamp())
+    now   = int(datetime.now(timezone.utc).timestamp())
+    token = make_account_token(email) if password else None
+    pw_hash = hash_password(password) if password else None
     with get_db() as db:
-        db.execute("""
-            INSERT INTO users (email, firstname, created_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(email) DO UPDATE SET firstname=excluded.firstname
-        """, (email, firstname, now))
-    return jsonify({"status": "ok", "email": email})
+        if pw_hash:
+            db.execute("""
+                INSERT INTO users (email, firstname, created_at, password_hash, account_token)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(email) DO UPDATE SET
+                    firstname=excluded.firstname,
+                    password_hash=excluded.password_hash,
+                    account_token=excluded.account_token
+            """, (email, firstname, now, pw_hash, token))
+        else:
+            db.execute("""
+                INSERT INTO users (email, firstname, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(email) DO UPDATE SET firstname=excluded.firstname
+            """, (email, firstname, now))
+    return jsonify({"status": "ok", "email": email, "token": token})
+
+
+@app.route("/account/login", methods=["POST"])
+def login():
+    """Validate email + password → return session token."""
+    data     = request.json or {}
+    email    = data.get("email", "").strip().lower()
+    password = data.get("password", "").strip()
+    if not email or not password:
+        return jsonify({"error": "email and password required"}), 400
+    with get_db() as db:
+        user = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+    if not user or not user["password_hash"]:
+        return jsonify({"error": "Invalid email or password"}), 401
+    if not verify_password(password, user["password_hash"]):
+        return jsonify({"error": "Invalid email or password"}), 401
+    token = make_account_token(email)
+    with get_db() as db:
+        db.execute("UPDATE users SET account_token=? WHERE email=?", (token, email))
+    return jsonify({"token": token, "firstname": user["firstname"], "email": email})
+
+
+@app.route("/account/me", methods=["GET"])
+def account_me():
+    """Validate token → return user info + partners."""
+    token = request.args.get("token", "").strip()
+    if not token:
+        return jsonify({"error": "token required"}), 400
+    with get_db() as db:
+        user = db.execute(
+            "SELECT * FROM users WHERE account_token=?", (token,)
+        ).fetchone()
+    if not user:
+        return jsonify({"error": "Invalid or expired token"}), 401
+    partners = get_partners(user["email"])
+    return jsonify({
+        "firstname": user["firstname"],
+        "email":     user["email"],
+        "partners":  [dict(p) for p in partners],
+    })
 
 @app.route("/account/partners", methods=["POST"])
 def add_partner():
