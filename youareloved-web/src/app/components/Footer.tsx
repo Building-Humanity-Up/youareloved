@@ -1,6 +1,11 @@
+"use client";
+
 import Link from "next/link";
+import { useLanguage } from "@/contexts/LanguageContext";
 
 export default function Footer() {
+  const { t } = useLanguage();
+
   return (
     <footer className="border-t border-black/[0.06] py-12 px-6">
       <div className="mx-auto max-w-7xl flex flex-col md:flex-row items-center justify-between gap-6">
@@ -13,7 +18,7 @@ export default function Footer() {
             href="/privacy"
             className="hover:text-foreground transition-colors"
           >
-            Privacy
+            {t.footer.privacy}
           </Link>
           <a
             href="mailto:support@finallyfreeai.com"
