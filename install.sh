@@ -468,6 +468,37 @@ $PYTHON "$YAL_DIR/setup.py" --python-real "$PYTHON_REAL"
 echo ""
 echo -e "  ${GREEN}✓ Setup complete${RESET}"
 
+# ── Sync partners to YAL server ──────────────────────────────────────────
+echo ""
+echo -e "  ${YELLOW}Syncing accountability partners to server...${RESET}"
+
+$PYTHON -c "
+import json, os, urllib.request, urllib.error
+p = os.path.expanduser('~/.yal_config.json')
+try:
+    cfg = json.load(open(p))
+    email = next((p.get('email',"") for p in cfg.get('partners',[]) if p.get('email')),"")
+    user_email = email or 'unknown@youareloved.app'
+    firstname = os.environ.get('USER', 'user')
+    # Register user
+    req = urllib.request.Request('https://api.finallyfreeai.com/account/register',
+        data=json.dumps({'email':user_email,'firstname':firstname}).encode(),
+        headers={'Content-Type':'application/json'}, method='POST')
+    urllib.request.urlopen(req, timeout=10)
+    # Sync each partner
+    for p in cfg.get('partners',[]):
+        body = {'user_email':user_email,'partner_name':p.get('email','Partner').split('@')[0],
+                'partner_email':p.get('email',''),'partner_telegram':p.get('telegram_chat_id','') or p.get('telegram','')}
+        req = urllib.request.Request('https://api.finallyfreeai.com/account/partners',
+            data=json.dumps(body).encode(),
+            headers={'Content-Type':'application/json'}, method='POST')
+        urllib.request.urlopen(req, timeout=10)
+    print('  ✓ Partners synced to server')
+except Exception as e:
+    print(f'  ⚠ Server sync skipped: {e}')
+" 2>/dev/null || echo -e "  ${DIM}Server sync skipped (offline OK)${RESET}"
+
+
 # ── Install Guardian as LaunchAgent (user-level, for screen capture) ─────
 # ── Install Watchdog as LaunchDaemon (root, for anti-removal) ────────────
 
