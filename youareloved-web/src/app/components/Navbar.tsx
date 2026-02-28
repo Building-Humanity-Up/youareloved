@@ -15,10 +15,10 @@ export default function Navbar() {
 
   return (
     <nav
-      className={`fixed top-0 left-0 right-0 z-50 transition-all duration-500 ${
+      className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 ${
         scrolled
-          ? "glass-strong border-b border-white/5"
-          : "border-b border-transparent"
+          ? "glass border-b border-black/[0.06] shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
+          : ""
       }`}
     >
       <div className="mx-auto max-w-7xl px-6 lg:px-8">
@@ -33,20 +33,17 @@ export default function Navbar() {
           <div className="hidden md:flex items-center gap-8">
             <Link
               href="/#how-it-works"
-              className="text-[13px] text-muted-light hover:text-foreground transition-colors"
+              className="text-[13px] text-muted hover:text-foreground transition-colors"
             >
               How It Works
             </Link>
             <Link
               href="/#pricing"
-              className="text-[13px] text-muted-light hover:text-foreground transition-colors"
+              className="text-[13px] text-muted hover:text-foreground transition-colors"
             >
               Pricing
             </Link>
-            <Link
-              href="/download"
-              className="text-[13px] text-foreground font-medium"
-            >
+            <Link href="/download" className="btn btn-primary text-[13px] py-2 px-5">
               Download
             </Link>
           </div>
@@ -57,17 +54,17 @@ export default function Navbar() {
             aria-label="Toggle menu"
           >
             <span
-              className={`block w-5 h-px bg-white transition-all duration-300 origin-center ${
+              className={`block w-5 h-px bg-foreground transition-all duration-300 origin-center ${
                 open ? "rotate-45 translate-y-[3px]" : ""
               }`}
             />
             <span
-              className={`block w-5 h-px bg-white transition-all duration-300 ${
+              className={`block w-5 h-px bg-foreground transition-all duration-300 ${
                 open ? "opacity-0" : ""
               }`}
             />
             <span
-              className={`block w-5 h-px bg-white transition-all duration-300 origin-center ${
+              className={`block w-5 h-px bg-foreground transition-all duration-300 origin-center ${
                 open ? "-rotate-45 -translate-y-[3px]" : ""
               }`}
             />
@@ -76,19 +73,19 @@ export default function Navbar() {
       </div>
 
       {open && (
-        <div className="md:hidden glass-strong border-t border-white/5 animate-fade-in">
+        <div className="md:hidden glass border-t border-black/[0.06] animate-fade-in">
           <div className="px-6 py-5 flex flex-col gap-5">
             <Link
               href="/#how-it-works"
               onClick={() => setOpen(false)}
-              className="text-sm text-muted-light hover:text-foreground transition-colors"
+              className="text-sm text-muted hover:text-foreground transition-colors"
             >
               How It Works
             </Link>
             <Link
               href="/#pricing"
               onClick={() => setOpen(false)}
-              className="text-sm text-muted-light hover:text-foreground transition-colors"
+              className="text-sm text-muted hover:text-foreground transition-colors"
             >
               Pricing
             </Link>

@@ -1,13 +1,13 @@
 @import "tailwindcss";
 
 @theme inline {
-  --color-background: #0a0a0a;
-  --color-foreground: #ffffff;
+  --color-background: #ffffff;
+  --color-foreground: #0a0a0a;
   --color-gold: #c9a96e;
-  --color-gold-hover: #d4b87a;
-  --color-muted: #666666;
-  --color-muted-light: #999999;
-  --color-surface: #111111;
+  --color-gold-hover: #b8944f;
+  --color-muted: #6b7280;
+  --color-muted-light: #9ca3af;
+  --color-surface: #f5f5f7;
   --font-serif: var(--font-playfair);
   --font-sans: var(--font-inter);
 }
@@ -22,81 +22,150 @@ body {
 }
 
 ::selection {
-  background: rgba(201, 169, 110, 0.3);
+  background: rgba(201, 169, 110, 0.2);
 }
 
-/* ── Glass morphism ────────────────────────────────────── */
+/* ── Glass overlay (nav, mobile bar, modals) ───────────── */
 
 .glass {
-  position: relative;
-  background: rgba(255, 255, 255, 0.03);
-  backdrop-filter: blur(40px);
-  -webkit-backdrop-filter: blur(40px);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  transition: background 0.3s ease, border-color 0.3s ease;
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
 }
 
-.glass::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(255, 255, 255, 0.08),
-    transparent
-  );
-  pointer-events: none;
+/* ── Card / Panel surface ──────────────────────────────── */
+
+.card {
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 20px;
+  box-shadow:
+    0 4px 24px rgba(0, 0, 0, 0.03),
+    0 1px 2px rgba(0, 0, 0, 0.02);
+  transition: all 200ms ease-out;
 }
 
-.glass-strong {
-  background: rgba(255, 255, 255, 0.06);
-  backdrop-filter: blur(60px);
-  -webkit-backdrop-filter: blur(60px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+.card-hover:hover {
+  box-shadow:
+    0 8px 40px rgba(0, 0, 0, 0.06),
+    0 2px 4px rgba(0, 0, 0, 0.03);
+  transform: translateY(-2px);
 }
 
-.glass-hover:hover {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: rgba(255, 255, 255, 0.1);
+/* ── Pill buttons ──────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  font-size: 14px;
+  font-weight: 500;
+  padding: 13px 28px;
+  transition: all 200ms ease-out;
+  cursor: pointer;
+  text-decoration: none;
+  border: none;
 }
 
-/* ── Gold accent ───────────────────────────────────────── */
+.btn-primary {
+  background: #0a0a0a;
+  color: #ffffff;
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.btn-primary:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow:
+    0 4px 16px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.btn-secondary {
+  background: #ffffff;
+  color: #0a0a0a;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  border-color: rgba(0, 0, 0, 0.2);
+}
+
+.btn-gold {
+  background: #c9a96e;
+  color: #ffffff;
+  box-shadow:
+    0 1px 3px rgba(201, 169, 110, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+.btn-gold:hover:not(:disabled) {
+  background: #b8944f;
+  transform: translateY(-1px);
+  box-shadow:
+    0 4px 16px rgba(201, 169, 110, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── Form inputs ───────────────────────────────────────── */
+
+.input {
+  width: 100%;
+  background: #f9fafb;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 12px;
+  padding: 12px 16px;
+  font-size: 14px;
+  color: #0a0a0a;
+  transition: all 200ms ease-out;
+}
+
+.input:focus {
+  border-color: rgba(0, 0, 0, 0.24);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.04);
+}
+
+.input::placeholder {
+  color: #9ca3af;
+}
+
+/* ── Gold accent border ────────────────────────────────── */
 
 .gold-border {
-  border: 1px solid rgba(201, 169, 110, 0.4);
+  border: 1px solid rgba(201, 169, 110, 0.5);
   box-shadow:
-    0 0 60px rgba(201, 169, 110, 0.06),
-    inset 0 1px 0 rgba(201, 169, 110, 0.1);
+    0 8px 40px rgba(201, 169, 110, 0.08),
+    0 2px 4px rgba(0, 0, 0, 0.02);
 }
 
-/* ── Hero effects ──────────────────────────────────────── */
+/* ── Hero glow ─────────────────────────────────────────── */
 
 .hero-glow {
   position: absolute;
   top: 38%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 900px;
-  height: 600px;
+  width: 800px;
+  height: 500px;
   background: radial-gradient(
     ellipse,
-    rgba(255, 255, 255, 0.04) 0%,
-    transparent 70%
+    rgba(201, 169, 110, 0.06) 0%,
+    transparent 60%
   );
   pointer-events: none;
-}
-
-.bg-grid {
-  background-image: linear-gradient(
-      rgba(255, 255, 255, 0.018) 1px,
-      transparent 1px
-    ),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
-  background-size: 80px 80px;
 }
 
 /* ── Animations ────────────────────────────────────────── */
@@ -104,7 +173,7 @@ body {
 @keyframes fadeInUp {
   from {
     opacity: 0;
-    transform: translateY(24px);
+    transform: translateY(20px);
   }
   to {
     opacity: 1;
@@ -123,12 +192,12 @@ body {
 
 .animate-fade-in-up {
   opacity: 0;
-  animation: fadeInUp 0.9s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: fadeInUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 .animate-fade-in {
   opacity: 0;
-  animation: fadeIn 0.6s ease-out forwards;
+  animation: fadeIn 0.5s ease-out forwards;
 }
 
 .stagger-1 {
