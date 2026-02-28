@@ -2,18 +2,18 @@ import os, sqlite3, secrets, string, json, requests
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, send_file, abort
 from apscheduler.schedulers.background import BackgroundScheduler
-import io
+import io, uuid
 
 app = Flask(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-NEXTDNS_CONFIG_ID  = os.environ["NEXTDNS_CONFIG_ID"]        # e.g. abc123
+NEXTDNS_CONFIG_ID  = os.environ["NEXTDNS_CONFIG_ID"]
 NEXTDNS_API_KEY    = os.environ["NEXTDNS_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 DB_PATH            = os.environ.get("DB_PATH", "devices.db")
-BASE_URL           = os.environ["BASE_URL"]                  # https://YOUR_RAILWAY_URL
-SILENCE_THRESHOLD  = 30 * 60   # 30 minutes in seconds
-ACTIVE_WINDOW      = 2 * 60 * 60  # only alert if active in last 2 hours
+BASE_URL           = os.environ["BASE_URL"]
+SILENCE_THRESHOLD  = 30 * 60    # 30 minutes
+ACTIVE_WINDOW      = 2 * 60 * 60  # 2 hours
 
 # ── Database ──────────────────────────────────────────────────────────────────
 def get_db():
@@ -24,48 +24,75 @@ def get_db():
 def init_db():
     with get_db() as db:
         db.execute("""
-            CREATE TABLE IF NOT EXISTS devices (
-                token           TEXT PRIMARY KEY,
-                user_firstname  TEXT,
-                user_email      TEXT,
-                partner_email   TEXT,
+            CREATE TABLE IF NOT EXISTS users (
+                email       TEXT PRIMARY KEY,
+                firstname   TEXT,
+                created_at  INTEGER
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS partners (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_email       TEXT,
+                partner_name     TEXT,
+                partner_email    TEXT,
                 partner_telegram TEXT,
-                last_seen       INTEGER,
-                removal_alerted INTEGER DEFAULT 0,
-                created_at      INTEGER
+                added_at         INTEGER,
+                FOREIGN KEY (user_email) REFERENCES users(email)
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS devices (
+                token            TEXT PRIMARY KEY,
+                user_email       TEXT,
+                user_firstname   TEXT,
+                last_seen        INTEGER DEFAULT 0,
+                removal_alerted  INTEGER DEFAULT 0,
+                created_at       INTEGER,
+                FOREIGN KEY (user_email) REFERENCES users(email)
             )
         """)
         db.execute("""
             CREATE TABLE IF NOT EXISTS download_links (
-                link_token  TEXT PRIMARY KEY,
+                link_token   TEXT PRIMARY KEY,
                 device_token TEXT,
-                expires_at  INTEGER,
-                used        INTEGER DEFAULT 0
+                expires_at   INTEGER,
+                used         INTEGER DEFAULT 0
             )
         """)
 
 init_db()
 
-# ── Telegram ──────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def send_telegram(chat_id: str, message: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=10)
+    try:
+        requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=10)
+    except Exception as e:
+        print(f"Telegram error: {e}")
 
-# ── Token helpers ─────────────────────────────────────────────────────────────
 def make_random(n=4):
     return ''.join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(n))
 
 def make_link_token():
     return secrets.token_urlsafe(16)
 
+def get_partners(user_email: str):
+    with get_db() as db:
+        return db.execute(
+            "SELECT * FROM partners WHERE user_email=?", (user_email,)
+        ).fetchall()
+
+def notify_all_partners(user_email: str, message: str):
+    for partner in get_partners(user_email):
+        if partner["partner_telegram"]:
+            send_telegram(partner["partner_telegram"], message)
+
 # ── .mobileconfig generation ──────────────────────────────────────────────────
 def generate_mobileconfig(device_token: str, firstname: str) -> str:
     doh_url = f"https://dns.nextdns.io/{NEXTDNS_CONFIG_ID}/{device_token}"
-    profile_uuid   = str(__import__('uuid').uuid4()).upper()
-    dns_uuid       = str(__import__('uuid').uuid4()).upper()
-    filter_uuid    = str(__import__('uuid').uuid4()).upper()
-    restrict_uuid  = str(__import__('uuid').uuid4()).upper()
-    st_uuid        = str(__import__('uuid').uuid4()).upper()
+    profile_uuid  = str(uuid.uuid4()).upper()
+    dns_uuid      = str(uuid.uuid4()).upper()
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -73,56 +100,23 @@ def generate_mobileconfig(device_token: str, firstname: str) -> str:
 <dict>
     <key>PayloadContent</key>
     <array>
-
-        <!-- 1. DNS over HTTPS via NextDNS -->
         <dict>
             <key>PayloadType</key><string>com.apple.dnsSettings.managed</string>
             <key>PayloadIdentifier</key><string>app.youareloved.dns.{device_token}</string>
             <key>PayloadUUID</key><string>{dns_uuid}</string>
             <key>PayloadVersion</key><integer>1</integer>
             <key>PayloadDisplayName</key><string>You Are Loved — DNS Protection</string>
-            <key>DNSProtocol</key><string>HTTPS</string>
-            <key>ServerURL</key><string>{doh_url}</string>
-            <key>DNSOverHTTPSMatchDomains</key>
-            <array><string></string></array>
+            <key>DNSSettings</key>
+            <dict>
+                <key>DNSProtocol</key><string>HTTPS</string>
+                <key>ServerURL</key><string>{doh_url}</string>
+                <key>ServerAddresses</key>
+                <array>
+                    <string>45.90.28.58</string>
+                    <string>45.90.30.58</string>
+                </array>
+            </dict>
         </dict>
-
-        <!-- 2. WebKit content filter (Apple native) -->
-        <dict>
-            <key>PayloadType</key><string>com.apple.webContentFilter</string>
-            <key>PayloadIdentifier</key><string>app.youareloved.filter.{device_token}</string>
-            <key>PayloadUUID</key><string>{filter_uuid}</string>
-            <key>PayloadVersion</key><integer>1</integer>
-            <key>PayloadDisplayName</key><string>You Are Loved — Content Filter</string>
-            <key>FilterType</key><string>BuiltIn</string>
-            <key>AutoFilterEnabled</key><true/>
-            <key>FilterBrowsers</key><true/>
-            <key>FilterSockets</key><false/>
-        </dict>
-
-        <!-- 3. Restrictions — no VPN, no private browsing -->
-        <dict>
-            <key>PayloadType</key><string>com.apple.applicationaccess</string>
-            <key>PayloadIdentifier</key><string>app.youareloved.restrictions.{device_token}</string>
-            <key>PayloadUUID</key><string>{restrict_uuid}</string>
-            <key>PayloadVersion</key><integer>1</integer>
-            <key>PayloadDisplayName</key><string>You Are Loved — Restrictions</string>
-            <key>allowVPNCreation</key><false/>
-            <key>allowSafariPrivateBrowsing</key><false/>
-            <key>allowAccountModification</key><false/>
-        </dict>
-
-        <!-- 4. Screen Time lock -->
-        <dict>
-            <key>PayloadType</key><string>com.apple.screentime</string>
-            <key>PayloadIdentifier</key><string>app.youareloved.screentime.{device_token}</string>
-            <key>PayloadUUID</key><string>{st_uuid}</string>
-            <key>PayloadVersion</key><integer>1</integer>
-            <key>PayloadDisplayName</key><string>You Are Loved — Screen Time</string>
-            <key>restrictedContent</key><true/>
-            <key>contentFilterEnabled</key><true/>
-        </dict>
-
     </array>
     <key>PayloadDescription</key>
     <string>You Are Loved accountability protection for {firstname}</string>
@@ -138,29 +132,128 @@ def generate_mobileconfig(device_token: str, firstname: str) -> str:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok", "service": "yal-ios"})
+
+@app.route("/debug/devices", methods=["GET"])
+def debug_devices():
+    if request.args.get("secret") != "yal-debug-2026":
+        abort(403)
+    with get_db() as db:
+        devices = db.execute(
+            "SELECT token, user_firstname, user_email, last_seen, removal_alerted, created_at FROM devices"
+        ).fetchall()
+        return jsonify([dict(d) for d in devices])
+
+@app.route("/debug/users", methods=["GET"])
+def debug_users():
+    if request.args.get("secret") != "yal-debug-2026":
+        abort(403)
+    with get_db() as db:
+        users    = db.execute("SELECT * FROM users").fetchall()
+        partners = db.execute("SELECT * FROM partners").fetchall()
+        return jsonify({
+            "users":    [dict(u) for u in users],
+            "partners": [dict(p) for p in partners]
+        })
+
+# ── Account: register user + add partners ─────────────────────────────────────
+
+@app.route("/account/register", methods=["POST"])
+def register():
+    """Create or update a user account."""
+    data      = request.json or {}
+    email     = data.get("email", "").strip().lower()
+    firstname = data.get("firstname", "").strip().lower()
+    if not email or not firstname:
+        return jsonify({"error": "email and firstname required"}), 400
+    now = int(datetime.now(timezone.utc).timestamp())
+    with get_db() as db:
+        db.execute("""
+            INSERT INTO users (email, firstname, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET firstname=excluded.firstname
+        """, (email, firstname, now))
+    return jsonify({"status": "ok", "email": email})
+
+@app.route("/account/partners", methods=["POST"])
+def add_partner():
+    """Append-only: add an accountability partner to a user account."""
+    data             = request.json or {}
+    user_email       = data.get("user_email", "").strip().lower()
+    partner_name     = data.get("partner_name", "").strip()
+    partner_email    = data.get("partner_email", "").strip().lower()
+    partner_telegram = data.get("partner_telegram", "").strip().lstrip("@")
+    if not user_email or not partner_name:
+        return jsonify({"error": "user_email and partner_name required"}), 400
+    now = int(datetime.now(timezone.utc).timestamp())
+    with get_db() as db:
+        # Ensure user exists
+        user = db.execute("SELECT * FROM users WHERE email=?", (user_email,)).fetchone()
+        if not user:
+            return jsonify({"error": "User not found. Register first."}), 404
+        db.execute("""
+            INSERT INTO partners (user_email, partner_name, partner_email, partner_telegram, added_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_email, partner_name, partner_email, partner_telegram, now))
+    return jsonify({"status": "ok", "message": f"Partner {partner_name} added"})
+
+@app.route("/account/partners", methods=["GET"])
+def list_partners():
+    """Get all partners for a user — called by install.sh and iOS enrollment."""
+    email = request.args.get("email", "").strip().lower()
+    if not email:
+        return jsonify({"error": "email required"}), 400
+    partners = get_partners(email)
+    return jsonify([dict(p) for p in partners])
+
+# ── iOS enrollment ────────────────────────────────────────────────────────────
+
 @app.route("/ios/enroll", methods=["POST"])
 def enroll():
-    """Called by onboarding form. Generates profile + one-time download link."""
-    data = request.json or {}
-    firstname        = data.get("firstname", "").strip().lower()
-    user_email       = data.get("user_email", "").strip()
+    """Generate profile + one-time download link. Uses unified partner list."""
+    data      = request.json or {}
+    firstname = data.get("firstname", "").strip().lower()
+    user_email = data.get("user_email", "").strip().lower()
+
+    # Support legacy single-partner fields for backward compat
     partner_email    = data.get("partner_email", "").strip()
     partner_telegram = data.get("partner_telegram", "").strip().lstrip("@")
 
-    if not all([firstname, user_email, partner_telegram]):
-        return jsonify({"error": "Missing required fields"}), 400
+    if not firstname or not user_email:
+        return jsonify({"error": "firstname and user_email required"}), 400
 
+    now          = int(datetime.now(timezone.utc).timestamp())
     device_token = f"{firstname}-{make_random(4)}"
     link_token   = make_link_token()
-    now          = int(datetime.now(timezone.utc).timestamp())
-    expires      = now + 86400  # 24 hours
+    expires      = now + 86400
 
     with get_db() as db:
+        # Upsert user
         db.execute("""
-            INSERT INTO devices (token, user_firstname, user_email, partner_email,
-                                 partner_telegram, last_seen, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (device_token, firstname, user_email, partner_email, partner_telegram, 0, now))
+            INSERT INTO users (email, firstname, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET firstname=excluded.firstname
+        """, (user_email, firstname, now))
+
+        # If legacy partner fields provided and no partners exist yet, add them
+        existing_partners = db.execute(
+            "SELECT COUNT(*) as c FROM partners WHERE user_email=?", (user_email,)
+        ).fetchone()["c"]
+
+        if existing_partners == 0 and partner_telegram:
+            db.execute("""
+                INSERT INTO partners (user_email, partner_name, partner_email, partner_telegram, added_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (user_email, "Accountability Partner", partner_email, partner_telegram, now))
+
+        # Create device
+        db.execute("""
+            INSERT INTO devices (token, user_email, user_firstname, last_seen, created_at)
+            VALUES (?, ?, ?, 0, ?)
+        """, (device_token, user_email, firstname, now))
+
         db.execute("""
             INSERT INTO download_links (link_token, device_token, expires_at)
             VALUES (?, ?, ?)
@@ -169,110 +262,183 @@ def enroll():
     download_url = f"{BASE_URL}/ios/install?token={link_token}"
     return jsonify({"download_url": download_url, "device_token": device_token})
 
-
 @app.route("/ios/install", methods=["GET"])
 def install():
-    """Serves the personalised .mobileconfig. One-time use."""
     link_token = request.args.get("token", "")
     now = int(datetime.now(timezone.utc).timestamp())
-
     with get_db() as db:
         link = db.execute(
-            "SELECT * FROM download_links WHERE link_token=? AND used=0 AND expires_at>?",
+            "SELECT * FROM download_links WHERE link_token=? AND expires_at>?",
             (link_token, now)
         ).fetchone()
         if not link:
             abort(404)
-
         device = db.execute(
             "SELECT * FROM devices WHERE token=?", (link["device_token"],)
         ).fetchone()
         if not device:
             abort(404)
 
-        # Mark link used
-        db.execute("UPDATE download_links SET used=1 WHERE link_token=?", (link_token,))
+    firstname = device["user_firstname"].capitalize()
 
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>You Are Loved — Install Protection</title>
+    <style>
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+                background: #f2f2f7; padding: 40px 20px; text-align: center; }}
+        h1 {{ font-size: 1.5rem; font-weight: 700; color: #1c1c1e; margin-bottom: 8px; }}
+        .sub {{ color: #6c6c70; font-size: 0.95rem; line-height: 1.6; margin-bottom: 28px; }}
+        .step {{ background: white; border-radius: 14px; padding: 16px 18px;
+                 margin: 10px 0; text-align: left; display: flex;
+                 align-items: flex-start; gap: 14px; }}
+        .num {{ background: #1c1c1e; color: white; border-radius: 50%;
+                min-width: 28px; height: 28px; display: flex; align-items: center;
+                justify-content: center; font-size: 0.8rem; font-weight: 700; }}
+        .step-text {{ font-size: 0.9rem; color: #1c1c1e; line-height: 1.5; padding-top: 3px; }}
+        .deeplink {{ display: block; background: #1c1c1e; color: white; padding: 16px;
+                     border-radius: 14px; text-decoration: none; font-weight: 600;
+                     font-size: 1rem; margin: 24px 0 10px; }}
+        .footer {{ font-size: 0.78rem; color: #aeaeb2; margin-top: 20px; }}
+    </style>
+    <script>
+        window.onload = function() {{
+            setTimeout(function() {{
+                window.location.href = '/ios/profile/{link_token}';
+            }}, 600);
+        }};
+    </script>
+</head>
+<body>
+    <h1>Hi {firstname} 👋</h1>
+    <p class="sub">Your protection profile is downloading.<br>Follow these steps carefully.</p>
+    <div class="step"><div class="num">1</div>
+        <div class="step-text">Tap <b>Allow</b> when asked to download a configuration profile</div></div>
+    <div class="step"><div class="num">2</div>
+        <div class="step-text">Tap <b>Close</b> on the "Profile Downloaded" banner</div></div>
+    <div class="step"><div class="num">3</div>
+        <div class="step-text">Tap the button below to open Settings directly</div></div>
+    <div class="step"><div class="num">4</div>
+        <div class="step-text">Tap <b>You Are Loved Protection</b> → <b>Install</b> → enter your passcode</div></div>
+    <a href="App-prefs:root=General&path=ManagedConfigurationList" class="deeplink">
+        Open Settings → Install Profile ↗
+    </a>
+    <p class="footer">You Are Loved · Building Humanity Up</p>
+</body>
+</html>"""
+
+@app.route("/ios/profile/<link_token>", methods=["GET"])
+def serve_profile(link_token):
+    now = int(datetime.now(timezone.utc).timestamp())
+    with get_db() as db:
+        link = db.execute(
+            "SELECT * FROM download_links WHERE link_token=? AND expires_at>?",
+            (link_token, now)
+        ).fetchone()
+        if not link:
+            abort(404)
+        device = db.execute(
+            "SELECT * FROM devices WHERE token=?", (link["device_token"],)
+        ).fetchone()
+        if not device:
+            abort(404)
     profile_xml = generate_mobileconfig(device["token"], device["user_firstname"])
-    profile_bytes = profile_xml.encode("utf-8")
-
     return send_file(
-        io.BytesIO(profile_bytes),
+        io.BytesIO(profile_xml.encode("utf-8")),
         mimetype="application/x-apple-aspen-config",
         as_attachment=True,
         download_name="YouAreLoved.mobileconfig"
     )
 
-
 @app.route("/webhook/nextdns", methods=["POST"])
 def nextdns_webhook():
-    """NextDNS fires this on every blocked domain query."""
-    payload = request.json or {}
-    device_label = payload.get("device", {}).get("name", "")  # e.g. "daniel-k7x2"
+    payload      = request.json or {}
+    device_token = payload.get("device", {}).get("name", "")
     domain       = payload.get("domain", "unknown")
-    timestamp    = payload.get("timestamp", "")
-
-    now = int(datetime.now(timezone.utc).timestamp())
-
+    now          = int(datetime.now(timezone.utc).timestamp())
     with get_db() as db:
         device = db.execute(
-            "SELECT * FROM devices WHERE token=?", (device_label,)
+            "SELECT * FROM devices WHERE token=?", (device_token,)
         ).fetchone()
-
         if device:
-            # Update last_seen and reset removal alert flag
             db.execute(
                 "UPDATE devices SET last_seen=?, removal_alerted=0 WHERE token=?",
-                (now, device_label)
+                (now, device_token)
             )
-            partner_tg = device["partner_telegram"]
-            firstname  = device["user_firstname"].capitalize()
-
+            firstname = device["user_firstname"].capitalize()
             msg = (
                 f"🔴 <b>Blocked attempt on {firstname}'s iPhone</b>\n"
                 f"Domain: <code>{domain}</code>\n"
-                f"Time: {datetime.now(timezone.utc).strftime('%I:%M%p UTC')}\n"
-                f"Device: {device_label}"
+                f"Time: {datetime.now(timezone.utc).strftime('%I:%M %p UTC')}"
             )
-            send_telegram(partner_tg, msg)
-
+            notify_all_partners(device["user_email"], msg)
     return jsonify({"status": "ok"})
 
+@app.route("/api/config", methods=["GET"])
+def api_config():
+    """Called by macOS install.sh to fetch operator keys."""
+    return jsonify({
+        "telegram_bot_token": TELEGRAM_BOT_TOKEN,
+        "sendgrid_api_key":   os.environ.get("SENDGRID_API_KEY", ""),
+        "nextdns_config_id":  NEXTDNS_CONFIG_ID,
+        "base_url":           BASE_URL
+    })
 
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok", "service": "yal-ios"})
+# ── Silence detection cron ────────────────────────────────────────────────────
+def update_last_seen_from_nextdns():
+    try:
+        resp = requests.get(
+            f"https://api.nextdns.io/profiles/{NEXTDNS_CONFIG_ID}/logs?limit=100",
+            headers={"X-Api-Key": NEXTDNS_API_KEY},
+            timeout=10
+        )
+        if resp.status_code != 200:
+            print(f"NextDNS API error: {resp.status_code}")
+            return
+        entries = resp.json().get("data", [])
+        latest = {}
+        for entry in entries:
+            token  = entry.get("device", {}).get("name", "")
+            ts_str = entry.get("timestamp", "")
+            if not token or not ts_str:
+                continue
+            ts = int(datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp())
+            if token not in latest or ts > latest[token]:
+                latest[token] = ts
+        with get_db() as db:
+            for token, ts in latest.items():
+                db.execute(
+                    "UPDATE devices SET last_seen=?, removal_alerted=0 WHERE token=? AND last_seen < ?",
+                    (ts, token, ts)
+                )
+        print(f"NextDNS poll: updated {len(latest)} devices")
+    except Exception as e:
+        print(f"NextDNS poll error: {e}")
 
-
-# ── Silence detection cron (runs every 5 min) ─────────────────────────────────
 def check_silence():
-    now = int(datetime.now(timezone.utc).timestamp())
-    cutoff_active  = now - ACTIVE_WINDOW      # must have been active in last 2h
-    cutoff_silence = now - SILENCE_THRESHOLD  # silent for 30+ min
-
+    update_last_seen_from_nextdns()
+    now            = int(datetime.now(timezone.utc).timestamp())
+    cutoff_active  = now - ACTIVE_WINDOW
+    cutoff_silence = now - SILENCE_THRESHOLD
     with get_db() as db:
-        # Devices that were recently active but have gone silent
         gone_silent = db.execute("""
             SELECT * FROM devices
-            WHERE last_seen > ?
-              AND last_seen < ?
-              AND removal_alerted = 0
+            WHERE last_seen > ? AND last_seen < ? AND removal_alerted = 0
         """, (cutoff_active, cutoff_silence)).fetchall()
-
         for device in gone_silent:
-            firstname  = device["user_firstname"].capitalize()
-            partner_tg = device["partner_telegram"]
+            firstname    = device["user_firstname"].capitalize()
             last_seen_dt = datetime.fromtimestamp(device["last_seen"], tz=timezone.utc)
             silent_mins  = (now - device["last_seen"]) // 60
-
             msg = (
                 f"⚠️ <b>Protection may have been removed from {firstname}'s iPhone</b>\n"
-                f"No DNS queries for {silent_mins} minutes\n"
-                f"Last seen: {last_seen_dt.strftime('%I:%M%p UTC')}\n"
-                f"If {firstname} is not in Airplane Mode or a dead zone, "
-                f"the protection profile may have been removed."
+                f"No DNS activity for {silent_mins} minutes\n"
+                f"Last seen: {last_seen_dt.strftime('%I:%M %p UTC')}\n"
+                f"If {firstname} is not in Airplane Mode, the profile was likely removed."
             )
-            send_telegram(partner_tg, msg)
+            notify_all_partners(device["user_email"], msg)
             db.execute(
                 "UPDATE devices SET removal_alerted=1 WHERE token=?",
                 (device["token"],)
