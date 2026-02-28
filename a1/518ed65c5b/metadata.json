@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.4.5",
+  "checkpoint_id": "a1518ed65c5b",
+  "strategy": "manual-commit",
+  "branch": "claude/elated-almeida",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "youareloved-web/src/app/components/Footer.tsx",
+    "youareloved-web/src/app/components/LanguageSelector.tsx",
+    "youareloved-web/src/app/components/MobileBottomBar.tsx",
+    "youareloved-web/src/app/components/Navbar.tsx",
+    "youareloved-web/src/app/layout.tsx",
+    "youareloved-web/src/app/page.tsx",
+    "youareloved-web/src/contexts/LanguageContext.tsx",
+    "youareloved-web/src/i18n/translations.ts"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a1/518ed65c5b/0/metadata.json",
+      "transcript": "/a1/518ed65c5b/0/full.jsonl",
+      "context": "/a1/518ed65c5b/0/context.md",
+      "content_hash": "/a1/518ed65c5b/0/content_hash.txt",
+      "prompt": "/a1/518ed65c5b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 86,
+    "cache_creation_tokens": 195675,
+    "cache_read_tokens": 5334290,
+    "output_tokens": 1153,
+    "api_call_count": 68
+  }
+}

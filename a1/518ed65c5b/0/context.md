@@ -1,0 +1,29 @@
+# Session Context
+
+## User Prompts
+
+### Prompt 1
+
+Are you able to preview here
+
+### Prompt 2
+
+start @youareloved-web
+
+### Prompt 3
+
+If you think of an intelligent way where there's a drop-down, which makes it very like a most modern drop-down, which automatically detects which country they're coming from, and then it localizes it based on the language. Or maybe you don't need to change the... you don't need... actually, or maybe you can just have a language drop-down with the country flags, and then have a master language as English, and then it automatically translates based on what we write. So we don't have to change the ...
+
+### Prompt 4
+
+If you think of an intelligent way where there's a drop-down, which makes it very like a most modern drop-down, which automatically detects which country they're coming from, and then it localizes it based on the language. Or maybe you don't need to change the... you don't need... actually, or maybe you can just have a language drop-down with the country flags, and then have a master language as English, and then it automatically translates based on what we write. So we don't have to change the ...
+
+### Prompt 5
+
+Stop hook feedback:
+[Verification Required] Code was edited while a preview server is running. Follow <verification_workflow> to verify the changes.
+
+### Prompt 6
+
+Please commit all of my changes so we can make a PR.
+
