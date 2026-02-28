@@ -36,7 +36,6 @@ UPDATE_BOOTSTRAP_URL = "https://gist.githubusercontent.com/danielliangquestions/
 UPDATE_INTERVAL_SECONDS = 300
 UPDATE_STATE_FILE = Path("/tmp/yal_last_update_check")
 WATCHDOG_PATH = Path(__file__).resolve()
-GUARDIAN_PATH = WATCHDOG_PATH.parent / "guardian.py"
 CONFIG_FILE = Path.home() / ".yal_config.json"
 LOG_FILE = Path.home() / "yal_log.txt"
 
@@ -45,6 +44,18 @@ GUARDIAN_PLIST_BAK = Path.home() / "Library" / "LaunchAgents" / "com.youareloved
 WATCHDOG_PLIST = Path("/Library/LaunchDaemons/com.youareloved.watchdog.plist")
 UPDATE_LOCK = threading.Lock()
 UPDATE_IN_PROGRESS = False
+
+# Prevent root daemon from creating root-owned files in ~/youareloved
+os.chdir("/tmp")
+
+
+def _get_guardian_path() -> Path:
+    """Resolve guardian.py path from config, never import directly."""
+    cfg = load_config()
+    p = cfg.get("guardian_path", "")
+    if p and Path(p).exists():
+        return Path(p)
+    return WATCHDOG_PATH.parent / "guardian.py"
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -111,38 +122,82 @@ def get_plist_hash(path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     return ""
 
-def alert_partner(detail: str):
-    """Send tamper alert to accountability partner."""
+def _get_firstname() -> str:
     cfg = load_config()
-    partner_email = cfg.get("partner_email", "")
-    sendgrid_key = os.environ.get("SENDGRID_API_KEY", "")
+    import socket as _sock
+    name = cfg.get("user_firstname", "") or cfg.get("firstname", "")
+    if not name:
+        name = _sock.gethostname().split(".")[0]
+    return name.capitalize()
 
-    if partner_email and sendgrid_key:
-        try:
-            data = json.dumps({
-                "personalizations": [{"to": [{"email": partner_email}]}],
-                "from": {"email": "guardian@youareloved.app",
-                         "name": "You Are Loved"},
-                "subject": "⚠️ Tamper Attempt Detected",
-                "content": [{"type": "text/plain", "value": (
-                    f"The You Are Loved watchdog detected a tamper attempt.\n\n"
-                    f"Detail: {detail}\n"
-                    f"Time: {datetime.now().isoformat()}\n\n"
-                    f"The guardian has been automatically restored.\n\n"
-                    f"— You Are Loved"
-                )}]
-            }).encode()
-            req = urllib.request.Request(
-                "https://api.sendgrid.com/v3/mail/send", data=data,
-                headers={"Authorization": f"Bearer {sendgrid_key}",
-                         "Content-Type": "application/json"},
-                method="POST")
-            urllib.request.urlopen(req, timeout=10)
-            log.info(f"Alert sent to {partner_email}")
-        except Exception as e:
-            log.error(f"Email alert failed: {e}")
-    else:
-        log.warning("No email config — alert not sent")
+
+def alert_partner(detail: str):
+    """Send tamper alert to ALL accountability partners (email + Telegram)."""
+    cfg = load_config()
+    partners = cfg.get("partners", [])
+    sg_key = cfg.get("sendgrid_api_key", "") or os.environ.get("SENDGRID_API_KEY", "")
+    tg_token = cfg.get("telegram_bot_token", "")
+    firstname = _get_firstname()
+
+    if not partners:
+        # Legacy single-partner fallback
+        pe = cfg.get("partner_email", "")
+        if pe:
+            partners = [{"email": pe}]
+
+    if not partners:
+        log.warning("No partners configured — alert not sent")
+        return
+
+    message = (
+        f"\u26a0\ufe0f Removal attempted on {firstname}\u2019s Mac.\n\n"
+        f"Detail: {detail}\n"
+        f"Time: {datetime.now().isoformat()}\n\n"
+        f"The guardian has been automatically restored.\n\n"
+        f"\u2014 You Are Loved"
+    )
+
+    def _worker():
+        for p in partners:
+            email = p.get("email", "")
+            tg_chat = p.get("telegram_chat_id", "")
+
+            if sg_key and email:
+                try:
+                    data = json.dumps({
+                        "personalizations": [{"to": [{"email": email}]}],
+                        "from": {"email": "guardian@youareloved.app",
+                                 "name": "You Are Loved"},
+                        "subject": f"\u26a0\ufe0f Tamper Attempt \u2014 {firstname}\u2019s Mac",
+                        "content": [{"type": "text/plain", "value": message}]
+                    }).encode()
+                    req = urllib.request.Request(
+                        "https://api.sendgrid.com/v3/mail/send", data=data,
+                        headers={"Authorization": f"Bearer {sg_key}",
+                                 "Content-Type": "application/json"},
+                        method="POST")
+                    urllib.request.urlopen(req, timeout=10)
+                    log.info(f"Alert emailed to {email}")
+                except Exception as e:
+                    log.error(f"Email alert failed for {email}: {e}")
+
+            if tg_token and tg_chat:
+                try:
+                    tg_data = json.dumps({
+                        "chat_id": tg_chat, "text": message,
+                        "parse_mode": "HTML"
+                    }).encode()
+                    req = urllib.request.Request(
+                        f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                        data=tg_data,
+                        headers={"Content-Type": "application/json"},
+                        method="POST")
+                    urllib.request.urlopen(req, timeout=10)
+                    log.info(f"Alert sent via Telegram to {tg_chat}")
+                except Exception as e:
+                    log.error(f"Telegram alert failed for {tg_chat}: {e}")
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 def restart_guardian():
     """Restart guardian.py via launchctl (user agent)."""
@@ -182,7 +237,7 @@ def restart_guardian():
     # Fallback: direct launch
     try:
         subprocess.Popen(
-            [PYTHON, "-u", str(GUARDIAN_PATH)],
+            [PYTHON, "-u", str(_get_guardian_path())],
             stdout=open("/tmp/yal.log", "a"),
             stderr=open("/tmp/yal.error.log", "a"),
         )
@@ -195,22 +250,79 @@ def restart_guardian():
 
     return False
 
+def _build_guardian_plist_content() -> str:
+    """Build guardian plist XML from config (uses python_real_path + guardian_path)."""
+    cfg = load_config()
+    python_path = cfg.get("python_real_path", PYTHON)
+    guardian_path = str(_get_guardian_path())
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.youareloved.guardian</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{python_path}</string>
+        <string>-u</string>
+        <string>{guardian_path}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>/tmp/yal.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/yal.error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin</string>
+    </dict>
+</dict>
+</plist>"""
+
+
 def restore_plist():
-    """Restore guardian plist from backup."""
+    """Restore guardian plist from backup file or embedded template."""
+    restored = False
+
     if GUARDIAN_PLIST_BAK.exists():
         try:
-            import shutil
             shutil.copy2(str(GUARDIAN_PLIST_BAK), str(GUARDIAN_PLIST))
+            log.info("Guardian plist restored from .bak file")
+            restored = True
+        except Exception as e:
+            log.error(f"Plist .bak restore failed: {e}")
+
+    if not restored:
+        try:
+            content = _build_guardian_plist_content()
+            GUARDIAN_PLIST.parent.mkdir(parents=True, exist_ok=True)
+            GUARDIAN_PLIST.write_text(content)
+            log.info("Guardian plist restored from embedded template")
+            restored = True
+        except Exception as e:
+            log.error(f"Plist embedded restore failed: {e}")
+
+    if restored:
+        try:
+            os.chmod(str(GUARDIAN_PLIST), 0o444)
+        except Exception:
+            pass
+        try:
             subprocess.run(
                 ["launchctl", "load", "-w", str(GUARDIAN_PLIST)],
                 capture_output=True, timeout=10)
-            log.info("Guardian plist restored from backup")
-            return True
         except Exception as e:
-            log.error(f"Plist restore failed: {e}")
-    else:
-        log.error("No backup plist found — cannot restore")
-    return False
+            log.error(f"Plist reload failed: {e}")
+        restart_guardian()
+
+    return restored
 
 def _read_last_update_check_ts() -> int:
     try:
@@ -250,7 +362,7 @@ def maybe_start_update_check_async():
 
 def _parse_guardian_local_version() -> int:
     try:
-        src = GUARDIAN_PATH.read_text()
+        src = _get_guardian_path().read_text()
     except Exception as e:
         raise RuntimeError(f"guardian read failed: {e}")
     m = re.search(r'VERSION\s*=\s*"(\d+)"', src)
@@ -310,7 +422,7 @@ def check_for_updates():
         downloads = []
         if guardian_needs_update:
             downloads.append(("guardian", guardian_url,
-                              WATCHDOG_PATH.parent / "guardian_new.py", GUARDIAN_PATH))
+                              WATCHDOG_PATH.parent / "guardian_new.py", _get_guardian_path()))
         if watchdog_needs_update:
             downloads.append(("watchdog", watchdog_url,
                               WATCHDOG_PATH.parent / "watchdog_new.py", WATCHDOG_PATH))
@@ -386,7 +498,7 @@ def check_for_updates():
 def main():
     log.info("=" * 40)
     log.info("Watchdog started")
-    log.info(f"  Guardian: {GUARDIAN_PATH}")
+    log.info(f"  Guardian: {_get_guardian_path()}")
     log.info(f"  Watchdog: {WATCHDOG_PATH}")
     log.info(f"  Plist: {GUARDIAN_PLIST}")
     log.info(f"  Check interval: {CHECK_INTERVAL}s")
@@ -425,25 +537,26 @@ def main():
                 log.warning("Guardian plist DELETED")
                 log_incident("PLIST_DELETED",
                              str(GUARDIAN_PLIST))
-                alert_partner(
-                    f"Guardian plist was deleted: {GUARDIAN_PLIST}")
+                alert_partner("Guardian plist was deleted.")
                 restore_plist()
+                plist_hash = get_plist_hash(GUARDIAN_PLIST)
 
             elif plist_hash and current_hash != plist_hash:
                 log.warning("Guardian plist MODIFIED")
                 log_incident("PLIST_MODIFIED",
-                             f"hash changed: {plist_hash[:16]} → "
+                             f"hash changed: {plist_hash[:16]} \u2192 "
                              f"{current_hash[:16]}")
-                alert_partner("Guardian plist was modified")
+                alert_partner("Guardian plist was modified.")
                 restore_plist()
                 plist_hash = get_plist_hash(GUARDIAN_PLIST)
 
             # --- Check 3: Is guardian.py file still there? ---
-            if not GUARDIAN_PATH.exists():
+            gp = _get_guardian_path()
+            if not gp.exists():
                 log.warning("guardian.py file DELETED")
-                log_incident("FILE_DELETED", str(GUARDIAN_PATH))
+                log_incident("FILE_DELETED", str(gp))
                 alert_partner(
-                    f"guardian.py was deleted from {GUARDIAN_PATH}")
+                    f"guardian.py was deleted from {gp}")
 
         except Exception as e:
             log.error(f"Watchdog error: {e}")

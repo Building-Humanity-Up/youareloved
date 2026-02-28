@@ -358,6 +358,64 @@ def get_telegram_token() -> str:
     cfg = load_config()
     return cfg.get("telegram_bot_token", "")
 
+
+_PARTNER_SYNC_INTERVAL = 6 * 3600  # 6 hours
+
+
+def fetch_server_partners() -> list:
+    """Fetch partners from the server using account_token.
+
+    Updates local config on success. Falls back to local config silently.
+    """
+    cfg = load_config()
+    token = cfg.get("account_token", "")
+    if not token:
+        return cfg.get("partners", [])
+
+    try:
+        url = f"https://api.finallyfreeai.com/account/me?token={token}"
+        req = urllib.request.Request(url)
+        resp = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(resp.read().decode())
+        server_partners = data.get("partners", [])
+        if not server_partners:
+            return cfg.get("partners", [])
+
+        merged = []
+        for sp in server_partners:
+            local_match = None
+            sp_email = sp.get("partner_email", "") or sp.get("email", "")
+            for lp in cfg.get("partners", []):
+                if lp.get("email", "") == sp_email:
+                    local_match = lp
+                    break
+            merged.append({
+                "email":            sp_email,
+                "telegram":         sp.get("partner_telegram", "") or sp.get("telegram", ""),
+                "telegram_chat_id": (local_match or {}).get("telegram_chat_id", ""),
+                "name":             sp.get("partner_name", "") or sp.get("name", ""),
+            })
+
+        cfg["partners"] = merged
+        cfg["partners_last_sync"] = int(time.time())
+        save_config(cfg)
+        log.info(f"  Server partner sync: {len(merged)} partner(s) updated")
+        return merged
+    except Exception as e:
+        log.debug(f"  Server partner sync failed (using local): {e}")
+        return cfg.get("partners", [])
+
+
+def _partner_sync_loop():
+    """Background thread: re-fetch partners from server every 6 hours."""
+    while True:
+        time.sleep(_PARTNER_SYNC_INTERVAL)
+        try:
+            fetch_server_partners()
+        except Exception as e:
+            log.debug(f"  Partner sync loop error: {e}")
+
+
 def _fetch_telegram_chats_from_updates(tg_token: str, timeout_s: int = 10) -> dict:
     """Return mapping of normalized telegram usernames -> chat_id from bot getUpdates.
 
@@ -2441,7 +2499,7 @@ def main():
     log.info(f"  Tesseract: {'✓' if HAS_TESSERACT else '✗'}")
     log.info(f"  Scan intervals: {SCAN_ACTIVE}s / {SCAN_IDLE}s / "
              f"{SCAN_DEEP_IDLE}s")
-    partners = get_partners()
+    partners = fetch_server_partners()
     log.info(f"  Partners: {len(partners)}")
     for p in partners:
         tg = p.get('telegram', '') or p.get('telegram_chat_id', '')
@@ -2483,6 +2541,8 @@ def main():
             f"Visual detection is disabled.")
     threading.Thread(target=screen_recording_monitor,
                      daemon=True, name="sr-monitor").start()
+    threading.Thread(target=_partner_sync_loop,
+                     daemon=True, name="partner-sync").start()
 
     while True:
         try:

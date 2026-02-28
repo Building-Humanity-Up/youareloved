@@ -318,7 +318,7 @@ def enroll():
         return jsonify({"error": "firstname and user_email required"}), 400
 
     now          = int(datetime.now(timezone.utc).timestamp())
-    device_token = f"{firstname}-{make_random(4)}"
+    device_token = data.get("device_token", "").strip() or f"{firstname}-{make_random(4)}"
     link_token   = make_link_token()
     expires      = now + 86400
 
@@ -341,10 +341,13 @@ def enroll():
                 VALUES (?, ?, ?, ?, ?)
             """, (user_email, "Accountability Partner", partner_email, partner_telegram, now))
 
-        # Create device
+        # Create or update device
         db.execute("""
             INSERT INTO devices (token, user_email, user_firstname, last_seen, created_at)
             VALUES (?, ?, ?, 0, ?)
+            ON CONFLICT(token) DO UPDATE SET
+                user_email=excluded.user_email,
+                user_firstname=excluded.user_firstname
         """, (device_token, user_email, firstname, now))
 
         db.execute("""

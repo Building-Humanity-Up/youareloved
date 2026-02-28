@@ -794,19 +794,15 @@ class SetupApp:
             relief="flat", bd=0, cursor="hand2",
             activebackground="#333333")
 
-        # Continue button (disabled until verified)
+        # Continue button (disabled until verified — no bypass)
         self.sr_continue_btn = self.make_button(
             self.container, "Continue",
             self.show_accessibility, enabled=False)
         self.sr_continue_btn.pack(fill="x", ipady=4, side="bottom")
 
-        # Skip link (after several failed attempts)
-        self.sr_skip_frame = tk.Frame(self.container, bg=BG)
-        self.sr_skip_frame.pack(fill="x", side="bottom", pady=(8, 0))
-
         self.sr_attempt_count = 0
 
-        # Trigger TCC pre-population and start checking
+        # Trigger TCC pre-population and start 2s polling
         threading.Thread(target=self._sr_initial_check, daemon=True).start()
 
     def _sr_build_steps(self):
@@ -843,26 +839,25 @@ class SetupApp:
             self.screen_verified = True
             self.sr_status_icon.configure(text="\u2713", fg=GREEN)
             self.sr_status_text.configure(
-                text="Screen Recording is enabled.", fg=FG)
+                text="\u2713 Screen Recording verified", fg=GREEN)
             self.sr_steps.pack_forget()
             self.sr_path_frame.pack_forget()
             self.sr_copy_btn.pack_forget()
-            self.sr_skip_frame.pack_forget()
             self.sr_continue_btn.configure(
                 state="normal", bg=FG, fg=BG, cursor="hand2")
         elif result == "wallpaper":
             self.sr_attempt_count += 1
-            self.sr_status_icon.configure(text="\u25d0", fg=RED)
+            self.sr_status_icon.configure(text="\u2717", fg=RED)
             self.sr_status_text.configure(
-                text="Almost \u2014 wrong Python selected.\n"
-                     "Make sure the path below is toggled ON:",
+                text="Screen Recording granted to wrong binary.\n"
+                     "Enable this exact path:",
                 fg=RED)
             self._sr_show_path_and_buttons()
         else:
             self.sr_attempt_count += 1
-            self.sr_status_icon.configure(text="\u25cb", fg=RED)
+            self.sr_status_icon.configure(text="\u2717", fg=RED)
             self.sr_status_text.configure(
-                text="Screen Recording not enabled yet.", fg=RED)
+                text="\u2717 Not detected", fg=RED)
             self._sr_show_path_and_buttons()
             if self.sr_attempt_count == 1:
                 open_screen_recording_settings()
@@ -891,17 +886,6 @@ class SetupApp:
                   relief="flat", bd=0, cursor="hand2",
                   activebackground="#333333").pack(anchor="w", pady=(2, 0))
 
-        if self.sr_attempt_count >= 3:
-            for w in self.sr_skip_frame.winfo_children():
-                w.destroy()
-            tk.Button(self.sr_skip_frame,
-                      text="Skip for now \u2014 I'll fix this later",
-                      command=self._sr_skip,
-                      bg=BG, fg="#666666", font=FONT_SMALL,
-                      relief="flat", bd=0, cursor="hand2",
-                      activebackground=BG).pack(anchor="center")
-            self.sr_skip_frame.pack(fill="x", side="bottom", pady=(8, 0))
-
         self._sr_schedule_autopoll()
 
     def _sr_schedule_autopoll(self):
@@ -910,11 +894,10 @@ class SetupApp:
 
         def _poll():
             result = verify_screen_recording()
-            if result == "yes":
-                self.root.after(0, lambda: self._sr_handle_result("yes"))
-            else:
+            self.root.after(0, lambda: self._sr_handle_result(result))
+            if result != "yes":
                 self._sr_check_after_id = self.root.after(
-                    3000, self._sr_schedule_autopoll)
+                    2000, self._sr_schedule_autopoll)
 
         threading.Thread(target=_poll, daemon=True).start()
 
@@ -927,10 +910,6 @@ class SetupApp:
             self.root.after(0, lambda: self._sr_handle_result(result))
 
         threading.Thread(target=_check, daemon=True).start()
-
-    def _sr_skip(self):
-        self.screen_verified = False
-        self.show_accessibility()
 
     def _copy_path(self):
         copy_to_clipboard(PYTHON_REAL)
@@ -1033,18 +1012,15 @@ class SetupApp:
                   relief="flat", bd=0, cursor="hand2",
                   activebackground="#333333").pack(anchor="w", pady=(2, 0))
 
-        # Continue (disabled until verified)
+        # Continue (disabled until verified — no bypass)
         self.ax_continue_btn = self.make_button(
             self.container, "Continue",
             self.show_permission_summary, enabled=False)
         self.ax_continue_btn.pack(fill="x", ipady=4, side="bottom")
 
-        # Skip
-        self.ax_skip_frame = tk.Frame(self.container, bg=BG)
-        self.ax_skip_frame.pack(fill="x", side="bottom", pady=(8, 0))
         self.ax_attempt_count = 0
 
-        # Start checking
+        # Start 2s polling
         threading.Thread(target=self._ax_initial_check, daemon=True).start()
 
     def _ax_initial_check(self):
@@ -1056,26 +1032,16 @@ class SetupApp:
             self.ax_verified = True
             self.ax_status_icon.configure(text="\u2713", fg=GREEN)
             self.ax_status_text.configure(
-                text="Accessibility is enabled.", fg=FG)
+                text="\u2713 Accessibility verified", fg=GREEN)
             self.ax_continue_btn.configure(
                 state="normal", bg=FG, fg=BG, cursor="hand2")
         else:
             self.ax_attempt_count += 1
-            self.ax_status_icon.configure(text="\u25cb", fg=RED)
+            self.ax_status_icon.configure(text="\u2717", fg=RED)
             self.ax_status_text.configure(
-                text="Accessibility not enabled yet.", fg=RED)
+                text="\u2717 Not detected", fg=RED)
             if self.ax_attempt_count == 1:
                 open_accessibility_settings()
-            if self.ax_attempt_count >= 3:
-                for w in self.ax_skip_frame.winfo_children():
-                    w.destroy()
-                tk.Button(self.ax_skip_frame,
-                          text="Skip for now \u2014 I'll fix this later",
-                          command=self.show_permission_summary,
-                          bg=BG, fg="#666666", font=FONT_SMALL,
-                          relief="flat", bd=0, cursor="hand2",
-                          activebackground=BG).pack(anchor="center")
-                self.ax_skip_frame.pack(fill="x", side="bottom", pady=(8, 0))
             self._ax_schedule_autopoll()
 
     def _ax_schedule_autopoll(self):
@@ -1083,10 +1049,10 @@ class SetupApp:
             return
 
         def _poll():
-            if verify_accessibility():
-                self.root.after(0, lambda: self._ax_handle_result(True))
-            else:
-                self.root.after(3000, self._ax_schedule_autopoll)
+            ok = verify_accessibility()
+            self.root.after(0, lambda: self._ax_handle_result(ok))
+            if not ok:
+                self.root.after(2000, self._ax_schedule_autopoll)
 
         threading.Thread(target=_poll, daemon=True).start()
 

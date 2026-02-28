@@ -151,7 +151,8 @@ rm -f "$HOME/Library/LaunchAgents/com.youareloved.guardian.plist"
 echo -e "${GREEN}✓ LaunchDaemons removed${RESET}"
 
 # Remove files
-rm -rf "$HOME/youareloved"
+sudo rm -rf "$HOME/youareloved"
+sudo rm -rf "$HOME/youareloved/__pycache__"
 rm -f "$HOME/.yal_memory.json"
 rm -f "$HOME/.yal_config.json"
 rm -f /tmp/yal.log /tmp/yal.error.log /tmp/yal_text.log

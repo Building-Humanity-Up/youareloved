@@ -177,89 +177,88 @@ echo -e "  ${GREEN}✓ Files downloaded${RESET}"
 MODEL_DIR="$YAL_DIR/models"
 MODEL_FILE="$MODEL_DIR/640m.onnx"
 
-if [[ ! -f "$MODEL_FILE" ]] || [[ $(stat -f%z "$MODEL_FILE" 2>/dev/null || echo 0) -lt 1000000 ]]; then
+if [[ ! -f "$MODEL_FILE" ]] || [[ $(wc -c < "$MODEL_FILE") -lt 1000000 ]]; then
     echo ""
     echo -e "  ${YELLOW}Downloading visual detection model...${RESET}"
     mkdir -p "$MODEL_DIR"
     rm -f "$MODEL_FILE" 2>/dev/null
 
-    DOWNLOAD_OK=false
+    curl -L \
+        "https://github.com/Building-Humanity-Up/youareloved/releases/download/v0.2.0/640m.onnx" \
+        -o "$MODEL_FILE" \
+        --progress-bar 2>&1 | grep -v "^$"
 
-    # Method 1: Python with proper redirect handling (most reliable)
-    $PYTHON -c "
-import urllib.request, os, sys
-url = 'https://github.com/Building-Humanity-Up/youareloved/releases/download/v0.2.0/640m.onnx'
-out = '$MODEL_FILE'
-try:
-    req = urllib.request.Request(url, headers={
-        'Accept': 'application/octet-stream',
-        'User-Agent': 'YouAreLoved/0.2.0'
-    })
-    with urllib.request.urlopen(req) as resp:
-        data = resp.read()
-        if len(data) > 1000000:
-            with open(out, 'wb') as f:
-                f.write(data)
-            print(f'{len(data)/1024/1024:.1f}')
-        else:
-            print('SMALL')
-except Exception as e:
-    print(f'ERR:{e}')
-" 2>/dev/null | read -r MODEL_RESULT
-
-    if [[ -f "$MODEL_FILE" ]] && [[ $(stat -f%z "$MODEL_FILE" 2>/dev/null || echo 0) -gt 1000000 ]]; then
-        DOWNLOAD_OK=true
-    fi
-
-    # Method 2: curl with redirect following
-    if [[ "$DOWNLOAD_OK" != "true" ]]; then
-        curl -sL -H "Accept: application/octet-stream" \
-            "https://github.com/Building-Humanity-Up/youareloved/releases/download/v0.2.0/640m.onnx" \
-            -o "$MODEL_FILE" 2>/dev/null
-        if [[ -f "$MODEL_FILE" ]] && [[ $(stat -f%z "$MODEL_FILE" 2>/dev/null || echo 0) -gt 1000000 ]]; then
-            DOWNLOAD_OK=true
-        fi
-    fi
-
-    # Method 3: gh CLI if available
-    if [[ "$DOWNLOAD_OK" != "true" ]] && command -v gh &>/dev/null; then
-        rm -f "$MODEL_FILE" 2>/dev/null
-        gh release download v0.2.0 \
-            --repo Building-Humanity-Up/youareloved \
-            --pattern "640m.onnx" \
-            --dir "$MODEL_DIR" 2>/dev/null
-        if [[ -f "$MODEL_FILE" ]] && [[ $(stat -f%z "$MODEL_FILE" 2>/dev/null || echo 0) -gt 1000000 ]]; then
-            DOWNLOAD_OK=true
-        fi
-    fi
-
-    if [[ "$DOWNLOAD_OK" == "true" ]]; then
-        SIZE=$(du -h "$MODEL_FILE" | cut -f1)
-        echo -e "  ${GREEN}✓ Visual model: NudeNet 640m ($SIZE)${RESET}"
+    if [[ -f "$MODEL_FILE" ]] && \
+       [[ $(wc -c < "$MODEL_FILE") -gt 1000000 ]]; then
+        echo -e "  ${GREEN}✓ High-accuracy model ready${RESET}"
     else
-        rm -f "$MODEL_FILE" 2>/dev/null
-        echo -e "  ${YELLOW}⚠ Could not download 640m model${RESET}"
-        echo -e "  ${DIM}  Visual detection will use default 320n (lower accuracy)${RESET}"
-        echo -e "  ${DIM}  To fix later: gh release download v0.2.0 --repo Building-Humanity-Up/youareloved --pattern 640m.onnx --dir $MODEL_DIR${RESET}"
+        rm -f "$MODEL_FILE"
+        echo -e "  ${YELLOW}⚠ Using standard model (640m unavailable)${RESET}"
     fi
 else
     SIZE=$(du -h "$MODEL_FILE" | cut -f1)
     echo -e "  ${DIM}Visual model: already present ($SIZE)${RESET}"
 fi
 
-# ── Configure DNS ────────────────────────────────────────────────────────
+# ── Generate device token & configure DNS ─────────────────────────────────
 
 echo ""
 echo -e "  ${YELLOW}Configuring DNS protection...${RESET}"
 
+NEXTDNS_ID="5d8482"
+FIRSTNAME_LOWER=$(echo "$USER" | tr '[:upper:]' '[:lower:]')
+RANDOM4=$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom | head -c 4)
+MAC_DEVICE_TOKEN="${FIRSTNAME_LOWER}-mac-${RANDOM4}"
+DOH_URL="https://dns.nextdns.io/${NEXTDNS_ID}/${MAC_DEVICE_TOKEN}"
+
+echo -e "  ${DIM}Device token: $MAC_DEVICE_TOKEN${RESET}"
+
+# Store device token in config
+$PYTHON -c "
+import json, os
+p = os.path.expanduser('~/.yal_config.json')
+try:
+    cfg = json.load(open(p))
+except Exception:
+    cfg = {}
+cfg['mac_device_token'] = '$MAC_DEVICE_TOKEN'
+cfg['nextdns_doh_url'] = '$DOH_URL'
+with open(p, 'w') as f:
+    json.dump(cfg, f, indent=2)
+" 2>/dev/null
+
+# Set system DNS to NextDNS resolvers on all interfaces
 while IFS= read -r iface; do
     [[ -n "$iface" ]] && sudo networksetup -setdnsservers "$iface" \
-        45.90.28.0 45.90.30.0 2>/dev/null || true
+        45.90.28.58 45.90.30.58 2>/dev/null || true
 done < <(networksetup -listallnetworkservices | tail -n +2)
 
-echo -e "  ${GREEN}✓ DNS configured${RESET}"
+echo -e "  ${GREEN}✓ DNS configured (NextDNS)${RESET}"
 
-# ── Hosts file ───────────────────────────────────────────────────────────
+# Register device token with server
+$PYTHON -c "
+import json, os, urllib.request
+p = os.path.expanduser('~/.yal_config.json')
+try:
+    cfg = json.load(open(p))
+    email = cfg.get('user_email', '')
+    if not email:
+        email = next((p.get('email','') for p in cfg.get('partners',[]) if p.get('email')), '')
+    firstname = os.environ.get('USER', 'user')
+    body = json.dumps({
+        'firstname': firstname,
+        'user_email': email or 'unknown@youareloved.app',
+        'device_token': '$MAC_DEVICE_TOKEN'
+    }).encode()
+    req = urllib.request.Request('https://api.finallyfreeai.com/ios/enroll',
+        data=body, headers={'Content-Type':'application/json'}, method='POST')
+    urllib.request.urlopen(req, timeout=10)
+    print('  ✓ Device registered with server')
+except Exception as e:
+    print(f'  ⚠ Device registration skipped: {e}')
+" 2>/dev/null || echo -e "  ${DIM}Device registration skipped (offline OK)${RESET}"
+
+# ── Hosts file (fallback layer) ──────────────────────────────────────────
 
 if ! grep -q "You Are Loved" /etc/hosts 2>/dev/null; then
     echo -e "  ${YELLOW}Adding domain blocks...${RESET}"
@@ -586,6 +585,8 @@ sudo tee "$WATCHDOG_PLIST" > /dev/null << EOF
     <true/>
     <key>ThrottleInterval</key>
     <integer>15</integer>
+    <key>AbandonProcessGroup</key>
+    <true/>
     <key>StandardOutPath</key>
     <string>/tmp/yal_watchdog.log</string>
     <key>StandardErrorPath</key>
@@ -600,7 +601,7 @@ sudo tee "$WATCHDOG_PLIST" > /dev/null << EOF
 </dict>
 </plist>
 EOF
-sudo chmod 644 "$WATCHDOG_PLIST"
+sudo chmod 444 "$WATCHDOG_PLIST"
 sudo chown root:wheel "$WATCHDOG_PLIST"
 
 sudo launchctl bootstrap system/ "$WATCHDOG_PLIST"
