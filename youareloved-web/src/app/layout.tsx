@@ -22,9 +22,15 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  title: "You Are Loved — Accountability Software",
+  title: "Finally Free — Accountability Software",
   description:
     "Accountability software for Mac and iPhone. Your partners are notified the moment protection is removed. Built by Building Humanity Up.",
+  icons: {
+    icon: [
+      { url: "/brand/FF-Icon-Black.png", type: "image/png" },
+    ],
+    apple: "/brand/FF-Icon-Black.png",
+  },
 };
 
 export default function RootLayout({
