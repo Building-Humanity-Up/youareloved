@@ -39,20 +39,40 @@ except (ImportError, ModuleNotFoundError):
 CONFIG_FILE = Path.home() / ".yal_config.json"
 
 # ---------------------------------------------------------------------------
-# Parse --python-real from install.sh
+# Resolve PYTHON_REAL — the binary macOS grants TCC permission to
 # ---------------------------------------------------------------------------
 
-def _parse_python_real() -> str:
-    """Extract --python-real value from argv, or resolve it ourselves."""
+_DEFAULT_PYTHON_REAL = (
+    "/opt/homebrew/Cellar/python@3.11/3.11.14_3/Frameworks/"
+    "Python.framework/Versions/3.11/bin/python3.11"
+)
+
+
+def _resolve_python_real() -> str:
+    """Read python_real_path from config, then argv, then fallback."""
+    # 1. Config file (set by install.sh before setup.py launches)
+    if CONFIG_FILE.exists():
+        try:
+            cfg = json.loads(CONFIG_FILE.read_text())
+            p = cfg.get("python_real_path", "")
+            if p and os.path.isfile(p) and os.access(p, os.X_OK):
+                return p
+        except Exception:
+            pass
+    # 2. --python-real CLI arg from install.sh
     for i, arg in enumerate(sys.argv):
         if arg == "--python-real" and i + 1 < len(sys.argv):
-            path = sys.argv[i + 1]
-            if os.path.isfile(path) and os.access(path, os.X_OK):
-                return path
-    # Fallback: resolve our own executable
+            p = sys.argv[i + 1]
+            if os.path.isfile(p) and os.access(p, os.X_OK):
+                return p
+    # 3. Hardcoded default
+    if os.path.isfile(_DEFAULT_PYTHON_REAL) and os.access(_DEFAULT_PYTHON_REAL, os.X_OK):
+        return _DEFAULT_PYTHON_REAL
+    # 4. Last resort — resolve own executable
     return os.path.realpath(sys.executable)
 
-PYTHON_REAL = _parse_python_real()
+
+PYTHON_REAL = _resolve_python_real()
 
 # ---------------------------------------------------------------------------
 # Design tokens
@@ -141,56 +161,54 @@ def resolve_telegram_chats(token):
 # Screen Recording verification
 # ---------------------------------------------------------------------------
 
-def verify_screen_recording(python_path: str = "") -> str:
-    """
-    Content-aware Screen Recording verification.
+_SR_CHECK_SCRIPT = '''\
+import Quartz, sys
+img = Quartz.CGWindowListCreateImage(
+    Quartz.CGRectInfinite,
+    Quartz.kCGWindowListOptionOnScreenOnly,
+    Quartz.kCGNullWindowID,
+    Quartz.kCGWindowImageDefault)
+if not img or Quartz.CGImageGetWidth(img) == 0:
+    sys.exit(1)
+provider = Quartz.CGImageGetDataProvider(img)
+data = bytes(Quartz.CGDataProviderCopyData(provider))
+if all(b == 0 for b in data[:4000]):
+    sys.exit(2)
+from PIL import Image
+w = Quartz.CGImageGetWidth(img)
+h = Quartz.CGImageGetHeight(img)
+bpr = Quartz.CGImageGetBytesPerRow(img)
+pil = Image.frombuffer("RGBA",(w,h),data,"raw","BGRA",bpr,1).convert("L")
+pixels = list(pil.getdata())[::4]
+mean = sum(pixels)/len(pixels)
+std = (sum((p-mean)**2 for p in pixels)/len(pixels))**0.5
+sys.exit(0 if std > 45 else 3)
+'''
 
-    Uses the resolved Python binary to capture the screen, then measures
-    luminance standard deviation to distinguish:
-      - Full desktop (windows, text, UI chrome): std > 45 → "yes"
-      - Wallpaper-only (smooth gradient, no windows): std 3-45 → "wallpaper"
-      - Black / failed: std < 3 or error → "no"
+
+def verify_screen_recording(python_path: str = "") -> str:
+    """Run a subprocess under PYTHON_REAL to test TCC Screen Recording.
+
+    Exit codes from the child process:
+      0 = verified (std > 45, real desktop content)
+      1 = no image returned (permission denied or no display)
+      2 = all-black image (TCC blocked the capture)
+      3 = wallpaper only (wrong binary has the permission)
 
     Returns: "yes", "wallpaper", or "no"
     """
     py = python_path or PYTHON_REAL
     try:
         r = subprocess.run(
-            [py, "-c", """
-import sys
-try:
-    import Quartz
-    from PIL import Image
-    img = Quartz.CGWindowListCreateImage(
-        Quartz.CGRectInfinite,
-        Quartz.kCGWindowListOptionOnScreenOnly,
-        Quartz.kCGNullWindowID,
-        Quartz.kCGWindowImageDefault)
-    if not img or Quartz.CGImageGetWidth(img) == 0:
-        print('no'); sys.exit(0)
-    w = Quartz.CGImageGetWidth(img)
-    h = Quartz.CGImageGetHeight(img)
-    bpr = Quartz.CGImageGetBytesPerRow(img)
-    provider = Quartz.CGImageGetDataProvider(img)
-    data = bytes(Quartz.CGDataProviderCopyData(provider))
-    if all(b == 0 for b in data[:2000]):
-        print('no'); sys.exit(0)
-    pil = Image.frombuffer('RGBA', (w, h), data, 'raw', 'BGRA', bpr, 1).convert('L')
-    pixels = list(pil.getdata())[::4]
-    n = len(pixels)
-    mean = sum(pixels) / n
-    std = (sum((p - mean) ** 2 for p in pixels) / n) ** 0.5
-    if std > 45:
-        print('yes')
-    elif std > 3:
-        print('wallpaper')
-    else:
-        print('no')
-except Exception:
-    print('no')
-"""],
-            capture_output=True, text=True, timeout=15)
-        return r.stdout.strip() or "no"
+            [py, "-c", _SR_CHECK_SCRIPT],
+            capture_output=True, timeout=10,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        code = r.returncode
+        if code == 0:
+            return "yes"
+        if code == 3:
+            return "wallpaper"
+        return "no"
     except Exception:
         return "no"
 
@@ -572,6 +590,26 @@ class SetupApp:
         self.account_firstname = firstname
         if partners:
             self.partners = partners
+
+        # Write complete config immediately so guardian/watchdog can use it
+        existing = {}
+        if CONFIG_FILE.exists():
+            try:
+                existing = json.loads(CONFIG_FILE.read_text())
+            except Exception:
+                pass
+        existing.update({
+            "setup_complete": True,
+            "partners": self.partners,
+            "account_token": token,
+            "user_email": email,
+            "python_real_path": PYTHON_REAL,
+            "telegram_bot_token": existing.get(
+                "telegram_bot_token",
+                "8471668182:AAEDyIuFcazEzPcJa8ooa55jpffsiuONGkc"),
+        })
+        CONFIG_FILE.write_text(json.dumps(existing, indent=2))
+
         self._show_signin_welcome(firstname, partners)
 
     def _signin_error(self, msg: str):

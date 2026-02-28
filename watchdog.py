@@ -250,12 +250,8 @@ def restart_guardian():
 
     return False
 
-def _build_guardian_plist_content() -> str:
-    """Build guardian plist XML from config (uses python_real_path + guardian_path)."""
-    cfg = load_config()
-    python_path = cfg.get("python_real_path", PYTHON)
-    guardian_path = str(_get_guardian_path())
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
+GUARDIAN_PLIST_XML_TEMPLATE = """\
+<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -285,6 +281,14 @@ def _build_guardian_plist_content() -> str:
     </dict>
 </dict>
 </plist>"""
+
+
+def _build_guardian_plist_content() -> str:
+    cfg = load_config()
+    python_path = cfg.get("python_real_path", PYTHON)
+    guardian_path = str(_get_guardian_path())
+    return GUARDIAN_PLIST_XML_TEMPLATE.format(
+        python_path=python_path, guardian_path=guardian_path)
 
 
 def restore_plist():
@@ -536,11 +540,16 @@ def main():
             # --- Check 2: Is guardian plist intact? ---
             current_hash = get_plist_hash(GUARDIAN_PLIST)
 
-            if not GUARDIAN_PLIST.exists():
-                log.warning("Guardian plist DELETED")
-                log_incident("PLIST_DELETED",
+            plist_missing_or_empty = (
+                not GUARDIAN_PLIST.exists()
+                or GUARDIAN_PLIST.stat().st_size == 0
+            )
+            if plist_missing_or_empty:
+                reason = "DELETED" if not GUARDIAN_PLIST.exists() else "EMPTIED"
+                log.warning(f"Guardian plist {reason}")
+                log_incident(f"PLIST_{reason}",
                              str(GUARDIAN_PLIST))
-                alert_partner("Guardian plist was deleted.")
+                alert_partner(f"Guardian plist was {reason.lower()}.")
                 restore_plist()
                 plist_hash = get_plist_hash(GUARDIAN_PLIST)
 

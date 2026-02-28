@@ -1586,6 +1586,12 @@ def layer_P() -> tuple:
 # LAYER T2 — Browser Tab Intelligence
 # ═══════════════════════════════════════════════════════════════════════════
 
+TAB_BLOCKLIST = [
+    "pornhub", "xvideos", "xnxx", "redtube", "porn", "nude",
+    "xxx", "onlyfans", "brazzers",
+]
+
+
 def layer_T2() -> tuple:
     log.info("LAYER T2 — Browser Tab Intelligence")
     raw_tabs = []
@@ -1639,8 +1645,18 @@ end tell
 
     log.info(f"  Total: {len(raw_tabs)} ({safe_count} safe, {len(tabs)} scanned)")
 
-    all_ambiguous = []
     tab_data = [(url, title) for _, url, title in tabs]
+
+    # Fast blocklist check — instant trigger on known domains/keywords
+    for browser, url, title in tabs:
+        combined_lower = (url + " " + title).lower()
+        for term in TAB_BLOCKLIST:
+            if term in combined_lower:
+                detail = f"blocklist={term} tab:{browser} url={url[:80]}"
+                log.info(f"  \u2717 BLOCKLIST HIT: {detail}")
+                return True, detail, [], tab_data
+
+    all_ambiguous = []
 
     for browser, url, title in tabs:
         combined = url + " " + title

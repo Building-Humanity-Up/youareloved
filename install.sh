@@ -456,7 +456,20 @@ fi
 
 # ── Launch setup UI ──────────────────────────────────────────────────────
 #
-# Pass PYTHON_REAL so setup.py stores it in config for guardian to use.
+# Write python_real_path to config BEFORE launching setup.py,
+# so it can read the correct binary for TCC verification.
+
+$PYTHON -c "
+import json, os
+p = os.path.expanduser('~/.yal_config.json')
+try:
+    cfg = json.load(open(p))
+except Exception:
+    cfg = {}
+cfg['python_real_path'] = '$PYTHON_REAL'
+with open(p, 'w') as f:
+    json.dump(cfg, f, indent=2)
+" 2>/dev/null
 
 echo ""
 echo -e "  ${YELLOW}Launching setup...${RESET}"

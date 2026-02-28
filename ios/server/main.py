@@ -263,11 +263,18 @@ def account_me():
         ).fetchone()
     if not user:
         return jsonify({"error": "Invalid or expired token"}), 401
-    partners = get_partners(user["email"])
+    raw_partners = get_partners(user["email"])
+    # Deduplicate by (partner_telegram, partner_email), keep earliest added_at
+    seen = {}
+    for p in raw_partners:
+        key = (p["partner_telegram"] or "", p["partner_email"] or "")
+        if key not in seen or p["added_at"] < seen[key]["added_at"]:
+            seen[key] = dict(p)
+    partners = sorted(seen.values(), key=lambda x: x.get("added_at", 0))
     return jsonify({
         "firstname": user["firstname"],
         "email":     user["email"],
-        "partners":  [dict(p) for p in partners],
+        "partners":  partners,
     })
 
 @app.route("/account/partners", methods=["POST"])
