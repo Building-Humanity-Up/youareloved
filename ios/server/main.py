@@ -1,10 +1,12 @@
 import os, sqlite3, secrets, string, json, requests
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, send_file, abort
+from flask_cors import CORS
 from apscheduler.schedulers.background import BackgroundScheduler
 import io, uuid
 
 app = Flask(__name__)
+CORS(app, origins=["http://localhost:3000", "https://finallyfreeai.com", "https://www.finallyfreeai.com"])
 
 # ── Config ────────────────────────────────────────────────────────────────────
 NEXTDNS_CONFIG_ID  = os.environ["NEXTDNS_CONFIG_ID"]
