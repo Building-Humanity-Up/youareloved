@@ -21,3 +21,4 @@ yal.sh
 .claude/
 devices.db
 *.db
+models/640m.onnx
